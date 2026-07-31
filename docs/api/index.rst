@@ -57,7 +57,7 @@ reference. See :doc:`../guide/concepts/reading-quality`.
 Covariates and batch integration
 --------------------------------
 
-The encoding machinery behind ``condition_obs`` and ``nuisance_obs``. Most users
+The encoding machinery behind ``batch_key``. Most users
 never call these directly, since ``fit`` does, but they are public so a design matrix
 can be inspected or reused. See :doc:`../guide/tasks/batch-integration`.
 

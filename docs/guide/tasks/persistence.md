@@ -7,7 +7,7 @@ model.save("bae_model.pt")
 # later, or elsewhere
 model = BAE.load("bae_model.pt")
 model.transform(query)
-model.reconstruct(query)      # needs the fitted condition_obs columns
+model.reconstruct(query)      # needs the batch columns, under "decoder"/"both"
 ```
 
 `save` returns the path it wrote and creates parent directories. `.pt` is the

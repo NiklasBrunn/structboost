@@ -193,9 +193,9 @@ class TestLatentDimOverride:
     @pytest.mark.parametrize(
         "cfg_kwargs, fit_kwargs",
         [
-            ({}, {"condition_obs": ["batch"], "nuisance_obs": ["batch"]}),
+            ({}, {"batch_key": "batch"}),
             ({"split_softmax": True}, {}),
-            ({"split_softmax": True}, {"condition_obs": ["batch"], "nuisance_obs": ["batch"]}),
+            ({"split_softmax": True}, {"batch_key": "batch"}),
         ],
     )
     def test_override_composes_with_decoder_input_changes(self, cfg_kwargs, fit_kwargs):
@@ -240,8 +240,7 @@ class TestDecoderPretraining:
         _require_deps()
         _, adata = _fit(
             init_obsm="X_emb4",
-            condition_obs=["batch"],
-            nuisance_obs=["batch"],
+            batch_key="batch",
             init_pretrain_epochs=5,
         )
         assert adata.obsm["X_bae"].shape[1] == 4

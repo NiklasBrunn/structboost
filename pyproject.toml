@@ -109,7 +109,9 @@ indent-style = "space"
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
-pythonpath = ["."]
+# `src` first, so `pytest` in a checkout tests that checkout rather than
+# whichever copy happens to be installed in the environment.
+pythonpath = ["src", "."]
 markers = [
   "slow: marks tests as slow (select with '-m slow')",
 ]

@@ -88,11 +88,11 @@ def uncorrected_batch_r2() -> float:
 @pytest.mark.parametrize(
     "fit_kwargs",
     [
-        {"condition_obs": ["batch"]},
-        {"nuisance_obs": ["batch"]},
-        {"condition_obs": ["batch"], "nuisance_obs": ["batch"]},
+        {"batch_key": "batch", "batch_integration_mode": "decoder"},
+        {"batch_key": "batch", "batch_integration_mode": "both"},
+        {"batch_key": "batch"},
     ],
-    ids=["condition-only", "nuisance-only", "condition+nuisance"],
+    ids=["decoder", "both", "default"],
 )
 def test_supported_paths_remove_batch_from_latent(fit_kwargs, uncorrected_batch_r2):
     """Each correction path must leave less batch signal than no correction."""
@@ -104,12 +104,72 @@ def test_supported_paths_remove_batch_from_latent(fit_kwargs, uncorrected_batch_
     )
 
 
-def test_conditioning_is_enabled_by_condition_obs_alone(uncorrected_batch_r2):
-    """There is no mode to select: passing condition_obs turns conditioning on.
+def test_batch_key_alone_integrates(uncorrected_batch_r2):
+    """Passing `batch_key` alone must integrate, with no mode named.
 
-    Pins the simplification that replaced `conditioning_mode` -- if a future
-    change reintroduces a mode that defaults to off, this fails.
+    The default mode is "both". If a future change makes the default inert, or
+    reintroduces a mode that defaults to off, this fails.
     """
     _require_deps()
-    corrected = _fit_and_score(condition_obs=["batch"])
+    corrected = _fit_and_score(batch_key="batch")
     assert corrected < uncorrected_batch_r2
+
+
+def _quick_fit(adata, **fit_kwargs):
+    """A few iterations only: these tests check wiring, not integration quality."""
+    from structboost import BAE, BAEConfig
+
+    config = BAEConfig(latent_dim=3, max_iterations=3, enable_early_stopping=False, seed=0)
+    model = BAE(adata.n_vars, config)
+    model.fit(adata, verbose=False, **fit_kwargs)
+    return model
+
+
+def test_encoder_mode_reaches_only_the_boosting_fit():
+    """`"encoder"` must protect gene selection without conditioning the decoder.
+
+    The distinction is observable: a decoder that was never given the covariate
+    cannot demand it back at reconstruction time, which is what keeps a fitted
+    model usable on data carrying no covariate annotation.
+    """
+    _require_deps()
+    adata = _sim()
+    model = _quick_fit(adata, batch_key="batch", batch_integration_mode="encoder")
+
+    assert adata.uns["bae"]["batch_integration_mode"] == "encoder"
+    assert "batch_weights" in adata.uns["bae"]
+
+    stripped = adata.copy()
+    del stripped.obs["batch"]
+    model.reconstruct(stripped)
+
+
+def test_decoder_mode_reaches_only_the_decoder():
+    """`"decoder"` conditions reconstruction and leaves the boosting design alone."""
+    _require_deps()
+    adata = _sim()
+    _quick_fit(adata, batch_key="batch", batch_integration_mode="decoder")
+
+    assert adata.uns["bae"]["batch_integration_mode"] == "decoder"
+    # No nuisance regression, so no coefficients for it.
+    assert "batch_weights" not in adata.uns["bae"]
+
+
+def test_mode_without_batch_key_raises():
+    """A mode with nothing to integrate over is a mistake, not a silent no-op."""
+    _require_deps()
+    from structboost import BAE, BAEConfig
+
+    adata = _sim()
+    model = BAE(adata.n_vars, BAEConfig(latent_dim=2, max_iterations=2, seed=0))
+    with pytest.raises(ValueError, match="without a batch_key"):
+        model.fit(adata, batch_integration_mode="decoder", verbose=False)
+
+
+def test_str_and_list_batch_key_agree():
+    """`batch_key="batch"` and `batch_key=["batch"]` must be the same fit."""
+    _require_deps()
+    a1, a2 = _sim(), _sim()
+    _quick_fit(a1, batch_key="batch")
+    _quick_fit(a2, batch_key=["batch"])
+    np.testing.assert_array_equal(a1.obsm["X_bae"], a2.obsm["X_bae"])

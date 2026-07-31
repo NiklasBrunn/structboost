@@ -697,7 +697,7 @@ def test_masking_can_break_batch_integration_and_warns():
             seed=0,
         ),
     )
-    model.fit(adata, verbose=False, condition_obs=["batch"], nuisance_obs=["batch"])
+    model.fit(adata, verbose=False, batch_key="batch")
     res = model.stability_selection(adata, n_runs=8, seed=0)
 
     # The guard must be measurement-driven: an unconditioned model never warns.

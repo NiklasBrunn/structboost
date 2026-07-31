@@ -80,6 +80,21 @@ class BAEConfig:
         Boosting mode: "standard" or "refine".
     boosting_independent
         If True, reset boosting state for each latent dimension (recommended).
+    nuisance_ridge
+        Ridge strength for the batch covariates when batch_integration_mode
+        includes "encoder", expressed relative to each encoded column's
+        squared norm. Mandatory *gene* coefficients are never penalized. Default
+        0 preserves exact least squares.
+
+        This is a numerical-stability knob rather than a modelling one. Boosting
+        refits the mandatory block jointly at every step, and that block is the
+        mandatory genes together with the batch columns. When two of those are
+        collinear the solve has no unique answer and raises; when they are merely
+        close to collinear it returns a large, sign-unstable answer and raises
+        nothing. Reaching for a small value here, 1e-3 say, is the remedy in
+        the second case. It is never applied automatically, because ridge changes
+        the estimates and doing so silently would fit a different model than the
+        one asked for.
     prior_mode
         How the prior encoder weight matrix is treated when the model was built
         by :meth:`BAE.from_reference`; ignored otherwise. ``"frozen"`` (default)
@@ -201,6 +216,7 @@ class BAEConfig:
     boosting_mode: Literal["standard", "refine"] = "standard"
     boosting_independent: bool = True
     boosting_precompute_covcache: bool = False
+    nuisance_ridge: float = 0.0
     prior_mode: Literal["frozen", "anchored"] = "frozen"
     disentanglement: Literal["none", "correlation", "leave_one_out"] = "none"
     disentanglement_lambda: float = 1e-4
@@ -230,6 +246,8 @@ class BAEConfig:
             raise ValueError("decoder_dropout_rate must be in [0.0, 1.0)")
         if self.boosting_stepno < 1:
             raise ValueError("boosting_stepno must be >= 1")
+        if not np.isfinite(self.nuisance_ridge) or self.nuisance_ridge < 0:
+            raise ValueError("nuisance_ridge must be finite and >= 0")
         if self.prior_mode not in {"frozen", "anchored"}:
             raise ValueError("prior_mode must be 'frozen' or 'anchored'")
         if not 0.0 < self.boosting_nu <= 1.0:

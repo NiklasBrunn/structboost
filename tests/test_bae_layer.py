@@ -176,7 +176,7 @@ def test_downstream_methods_follow_the_fit_time_layer():
 
     a = _adata()
     model = BAE(a.n_vars, _config())
-    model.fit(a, layer="scaled", condition_obs=["batch"], verbose=False)
+    model.fit(a, layer="scaled", batch_key="batch", batch_integration_mode="decoder", verbose=False)
 
     # Would raise or silently use X if `self._layer` were not threaded through.
     model.stability_selection(a, mode="iteration", n_runs=2, seed=0, verbose=False)

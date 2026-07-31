@@ -74,10 +74,10 @@ Present when the corresponding feature was used:
   - `diagnostics=True`
 * - `mandatory_genes`
   - `mandatory_genes` was passed
-* - `conditioning_mode`, `condition_obs`, `condition_columns`
-  - `condition_obs` was passed
-* - `nuisance_obs`, `nuisance_columns`, `nuisance_weights`, `nuisance_ridge`
-  - `nuisance_obs` was passed
+* - `batch_key`, `batch_columns`
+  - `batch_key` was passed
+* - `batch_weights`, `nuisance_ridge`
+  - the mode included `"encoder"`
 * - `balance_obs`
   - `balance_obs` was passed
 * - `latent_obs_r2_per_dim`, `variance_explained`, `reconstruction_loss_by_obs`

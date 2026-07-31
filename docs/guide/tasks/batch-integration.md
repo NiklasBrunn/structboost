@@ -1,67 +1,84 @@
 # Batches and unwanted covariates
 
-Two mechanisms, deliberately independent. Passing one does not give you the
-other.
+Name the covariate once. The mode decides which of the two mechanisms act on it.
 
 ```python
-model.fit(
-    adata,
-    condition_obs=["batch"],   # decoder-side: explains reconstruction variation
-    nuisance_obs=["batch"],    # boosting-side: protects gene selection
-    nuisance_ridge=1e-3,       # optional, for correlated covariates
-    balance_obs="batch",       # optional, equal weight per group
-)
+model.fit(adata, batch_key="batch")                              # both, the default
+model.fit(adata, batch_key="batch", batch_integration_mode="decoder")
+model.fit(adata, batch_key=["batch", "donor"], balance_obs="batch")
 ```
 
-## `condition_obs`,  decoder conditioning
+No `batch_key` means no integration. Naming a mode without a `batch_key` raises,
+rather than quietly integrating nothing.
 
-The encoded covariates are concatenated to the decoder input. The decoder can
-then explain batch-driven variation directly, so the latent code does not have to
-carry it.
+## The two mechanisms
 
-Passing the argument is what enables conditioning. There is no mode to select.
-(An additive alternative was evaluated and rejected as strictly dominated: on simulated data with a known batch effect it
-left *more* batch variance in the latent than doing nothing: R² 0.38 against a
-0.35 uncorrected baseline, versus 0.006 for concatenation.)
+`"decoder"`
+: The encoded covariate is concatenated to the decoder input. The decoder can
+  then explain covariate-driven variation directly, so the latent code does not
+  have to carry it.
 
-The effect on the encoder is indirect: conditioning removes covariate signal from
-the latent only insofar as the decoder no longer needs it there.
+`"encoder"`
+: The encoded covariate is added to the boosting design as a mandatory
+  regressor, so a covariate-correlated gene is not selected *because of* the
+  covariate. Its coefficients are kept for diagnostics in
+  `adata.uns["bae"]["batch_weights"]` and excluded from the encoder, which stays
+  gene-only.
 
-## `nuisance_obs`,  protecting gene selection
+`"both"` (default)
+: Both. This is the usual choice, and the one the measurements below describe.
 
-The encoded covariates are appended to the boosting design matrix and marked
-mandatory, so the covariate is regressed out *inside* the boosting fit. This is
-what stops a batch-correlated gene from being selected because of the batch.
+:::{important}
+**The covariate is never an encoder input.** `"encoder"` names the half of the
+model the mechanism protects, not a tensor it is fed to.
 
-Their coefficients are kept for diagnostics in
-`adata.uns["bae"]["nuisance_weights"]` but excluded from the encoder, which stays
-gene-only.
-
-`nuisance_ridge` stabilizes the joint mandatory block when covariates are
-correlated. It is relative to each encoded column's squared norm, and gene
-mandatory coefficients stay unpenalized. The default `0` preserves exact OLS, and
-ridge is never applied automatically even when the block is singular, because
-ridge changes the estimates.
-
-## Why they are separate
-
-`transform` is gene-only and needs **no** covariate labels:
+{meth}`~structboost.BAE.transform` is gene-only and needs no covariate labels
+under any mode:
 
 ```python
 latent = model.transform(query_adata)     # no batch column required
 ```
 
-That is the point of keeping conditioning out of the encoder: the deployable
-artifact works on data with no covariate annotation at all. `reconstruct`, by
-contrast, requires the fitted `condition_obs` columns and rejects levels it did
-not see during fitting.
+That is the point. The deployable artifact works on data with no covariate
+annotation at all. {meth}`~structboost.BAE.reconstruct` needs the columns only
+under `"decoder"` and `"both"`, and rejects levels it did not see when fitting.
+:::
 
-Keeping the two mechanisms separate also means each can be ablated
-independently, which is how they were benchmarked in the first place.
+## Why the split exists at all
 
-## `balance_obs`,  equal weight per group
+A conditioning-only fit removes covariate signal from the latent, but nothing
+stops a batch-correlated gene from being selected in the first place. A
+regression-only fit protects selection, but leaves the decoder to account for the
+covariate through the latent code. They target different failures, which is why
+the default applies both and why each remains separately selectable.
 
-Inverse-frequency per-cell weights so a large group cannot dominate.
+An additive alternative to concatenative conditioning was evaluated and rejected
+as strictly dominated. On simulated data with a known batch effect it left *more*
+batch variance in the latent than doing nothing: R² 0.38 against a 0.35
+uncorrected baseline, versus 0.006 for concatenation.
+
+## Near-collinear covariates
+
+Boosting refits the mandatory block jointly at every step, and that block is the
+mandatory genes together with the batch columns. Exactly collinear entries raise.
+Merely close-to-collinear ones return a large, sign-unstable answer and raise
+nothing, which is the case worth knowing about.
+
+`BAEConfig.nuisance_ridge` is the remedy:
+
+```python
+BAEConfig(latent_dim=10, nuisance_ridge=1e-3)
+```
+
+It is relative to each encoded column's squared norm, and mandatory *gene*
+coefficients stay unpenalized. It is never applied automatically, because ridge
+changes the estimates and doing so silently would fit a different model than the
+one asked for.
+
+## `balance_obs` is a different thing
+
+Inverse-frequency per-cell weights, so a large group cannot dominate. It is a
+fairness knob, not an integration one, and it is passed separately.
 
 :::{warning}
 **The weights do not reach gene selection.** They enter the boosting-target
@@ -75,16 +92,9 @@ group**.
 :::
 
 Measured on a deliberately imbalanced 500/90/45 design: the spread in per-group
-reconstruction MSE fell from 0.231 to 0.150.
-
-Check whether it helped on your data:
-
-```python
-adata.uns["bae"]["reconstruction_loss_by_obs"]
-```
-
-And check first whether group size actually predicts fit quality, since uneven
-per-group reconstruction has causes other than imbalance.
+reconstruction MSE fell from 0.231 to 0.150. Check whether it helped on your
+data, and check first whether group size actually predicts fit quality, since
+uneven per-group reconstruction has causes other than imbalance.
 
 The column must be discrete: at most 50 levels, no missing values, at least two
 levels.
@@ -96,17 +106,21 @@ adata.uns["bae"]["latent_obs_r2_per_dim"]      # integration: near zero is good
 adata.uns["bae"]["reconstruction_loss_by_obs"] # fairness: even across groups?
 ```
 
-These answer different questions and are easy to confuse. See
+These answer different questions and are easy to confuse, see
 {doc}`../concepts/anndata-contract`. A single high entry in
 `latent_obs_r2_per_dim` is a residual covariate axis worth inspecting rather than
 a failure of the whole fit.
 
+Note that `"encoder"` alone targets gene selection rather than the latent, so it
+need not move `latent_obs_r2_per_dim` much. Judge it by which genes were
+selected.
+
 ## Encoding rules
 
-Covariate encoding is strict, and fails rather than guessing: missing values,
+Covariate encoding is strict and fails rather than guessing: missing values,
 constant columns and rank-deficient designs all raise. Categorical columns are
 dummy-encoded against the first observed level, numeric columns are used as-is,
-everything is then standardized.
+and everything is then standardized.
 
 The encoding parameters, not the training design matrix, are what a saved model
 carries, so `reconstruct` works on new data. See {doc}`persistence`.

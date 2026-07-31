@@ -90,7 +90,7 @@ Each of these has a guide page.
 
 | | |
 | --- | --- |
-| [Batch integration](https://niklasbrunn.github.io/structboost/guide/tasks/batch-integration.html) | `condition_obs` conditions the decoder, `nuisance_obs` protects gene selection. `transform` stays gene-only and needs no batch labels. |
+| [Batch integration](https://niklasbrunn.github.io/structboost/guide/tasks/batch-integration.html) | `batch_key` names the covariate and `batch_integration_mode` chooses whether it conditions the decoder, protects gene selection, or both. `transform` stays gene-only and needs no batch labels. |
 | [Transfer](https://niklasbrunn.github.io/structboost/guide/tasks/transfer.html) | Carry a trained encoder matrix onto a new dataset with `from_reference`, aligned by gene name, with the prior programs frozen. |
 | [Persistence](https://niklasbrunn.github.io/structboost/guide/tasks/persistence.html) | `save` and `load` a fitted model as one checkpoint, readable with `weights_only=True`. |
 | [Interpretation](https://niklasbrunn.github.io/structboost/guide/tasks/interpreting.html) | Ranked gene lists per dimension, stored functional annotations, and a self-contained interactive HTML explorer. |

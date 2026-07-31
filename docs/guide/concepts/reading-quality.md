@@ -22,8 +22,8 @@ adata.uns["bae"]["variance_explained"]
 ```
 
 :::{note}
-That key is only written when a covariate argument (`condition_obs`,
-`nuisance_obs` or `balance_obs`) was used. For a plain fit, compare against the
+That key is only written when a covariate argument (`batch_key` or
+`balance_obs`) was used. For a plain fit, compare against the
 ceiling below instead.
 :::
 

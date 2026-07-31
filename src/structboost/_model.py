@@ -279,6 +279,23 @@ class _FitLayer:
 #: able to be told explicitly.
 FIT_LAYER = _FitLayer()
 
+#: Sentinel default for ``batch_integration_mode``. Behaves as ``"both"``, but is
+#: distinguishable from a caller who typed ``"both"``, so that a mode given
+#: without a ``batch_key`` can be reported as the mistake it is instead of
+#: silently doing nothing.
+_MODE_UNSET = "__unset__"
+
+#: Which mechanisms each mode switches on. The covariate is never an encoder
+#: *input*: ``"encoder"`` means it enters the boosting fit as a mandatory
+#: regressor, so gene selection is not confounded by it.
+_BATCH_MODES: dict[str, tuple[bool, bool]] = {
+    # mode: (conditions the decoder, regresses inside the boosting fit)
+    "none": (False, False),
+    "decoder": (True, False),
+    "encoder": (False, True),
+    "both": (True, True),
+}
+
 
 def _expression_matrix(adata: AnnData, layer: str | None):
     """Return the matrix BAE should read, raw and possibly sparse.
@@ -424,12 +441,11 @@ class BAE(nn.Module):
         }
         self._training_report: TrainingReport | None = None
         self._latent_init: dict[str, str | int] = {"method": "zero", "pretrain_epochs": 0}
-        self._obs_encoding = None
-        self._condition_encoding = None
-        self._nuisance_encoding = None
-        self._conditioning_mode = "none"
-        self._nuisance_weights: np.ndarray | None = None
-        self._nuisance_ridge: float = 0.0
+        #: One encoding drives both mechanisms. Which of them are active is
+        #: recorded by `_batch_integration_mode` rather than by two attributes.
+        self._batch_encoding = None
+        self._batch_integration_mode: str = "none"
+        self._batch_weights: np.ndarray | None = None
         self._balance_obs: str | None = None
         self._mandatory_genes = None
         #: Layer `fit` read expression from; None means ``adata.X``. Later calls
@@ -682,7 +698,12 @@ class BAE(nn.Module):
         >>> model = BAE.load("bae_model.pt")  # doctest: +SKIP
         >>> latent = model.transform(adata)  # doctest: +SKIP
         """
-        from ._persistence import CHECKPOINT_FORMAT, MAGIC, restore_payload
+        from ._persistence import (
+            CHECKPOINT_FORMAT,
+            MAGIC,
+            MIN_CHECKPOINT_FORMAT,
+            restore_payload,
+        )
 
         source = Path(path)
         if not source.exists():
@@ -700,6 +721,12 @@ class BAE(nn.Module):
                 f"{source} uses checkpoint format {written_format}, written by structboost "
                 f"{payload.get('structboost_version', 'unknown')}; this install understands "
                 f"up to {CHECKPOINT_FORMAT}. Upgrade structboost to load it."
+            )
+        if written_format < MIN_CHECKPOINT_FORMAT:
+            raise ValueError(
+                f"{source} uses checkpoint format {written_format}, which predates the first "
+                f"public release; this install reads format {MIN_CHECKPOINT_FORMAT} and newer. "
+                "Refit the model to write a current checkpoint."
             )
         resolved = cls._resolve_load_device(device, source, payload)
         return restore_payload(cls, payload, resolved)
@@ -1497,9 +1524,8 @@ class BAE(nn.Module):
         *,
         layer: str | None = None,
         mandatory_genes: list[str] | list[int] | np.ndarray | list | None = None,
-        condition_obs: list[str] | None = None,
-        nuisance_obs: list[str] | None = None,
-        nuisance_ridge: float = 0.0,
+        batch_key: str | list[str] | None = None,
+        batch_integration_mode: Literal["encoder", "decoder", "both"] = _MODE_UNSET,  # type: ignore[assignment]
         balance_obs: str | None = None,
         max_iterations: int | None = None,
         early_stopping_patience: int | None = None,
@@ -1548,17 +1574,35 @@ class BAE(nn.Module):
             support: a gene whose contribution is estimated as zero still ends up
             with a zero encoder weight. Do not rely on this to guarantee that a
             marker appears in the selected gene set.
-        condition_obs
-            Columns encoded for decoder conditioning. These variables explain
-            reconstruction variation without entering the deployable encoder.
-        nuisance_obs
-            Columns included as mandatory nuisance regressors only while fitting
-            the boosting targets. Their coefficients are stored for diagnostics
-            but excluded from the gene-only encoder.
-        nuisance_ridge
-            Non-negative ridge strength for nuisance coefficients, relative to
-            each encoded column's squared norm. Gene mandatory coefficients
-            remain unpenalized. Default 0 preserves exact nuisance OLS.
+        batch_key
+            Obs column, or several, holding the covariate to integrate over.
+            ``None`` means no integration is performed.
+        batch_integration_mode
+            Which of the two mechanisms to apply. Defaults to ``"both"``.
+
+            ``"decoder"``
+                The encoded covariate is concatenated to the decoder input, so
+                the decoder can explain covariate-driven variation directly and
+                the latent code does not have to carry it.
+            ``"encoder"``
+                The encoded covariate is added to the boosting design as a
+                mandatory regressor, so a covariate-correlated gene is not
+                selected *because of* the covariate.
+            ``"both"``
+                Both of the above. This is the usual choice.
+
+            **The covariate is never an encoder input.** ``"encoder"`` names the
+            half of the model it protects, not a tensor it is fed to.
+            :meth:`transform` stays gene-only and needs no covariate labels under
+            any mode, which is what makes a fitted encoder deployable on data
+            carrying no covariate annotation. :meth:`reconstruct` needs them only
+            under ``"decoder"`` and ``"both"``.
+
+            Passing a mode without a ``batch_key`` raises, rather than silently
+            integrating nothing.
+
+            The ridge that stabilizes the ``"encoder"`` mechanism when covariates
+            are near-collinear lives on :class:`BAEConfig` as ``nuisance_ridge``.
         balance_obs
             Optional categorical obs column used to inverse-frequency weight the
             *reconstruction losses*, giving each observed level equal total weight
@@ -1661,12 +1705,31 @@ class BAE(nn.Module):
         # Resolve mandatory gene names to indices
         from ._utils import resolve_mandatory_genes
 
-        # Conditioning is on exactly when covariates are supplied; there is no
-        # separate mode to choose. An additive alternative was evaluated and
+        # Resolve the batch arguments. No `batch_key` means no integration, and a
+        # mode named without one is a mistake worth reporting rather than a
+        # silent no-op. An additive conditioning alternative was evaluated and
         # rejected as strictly dominated; the CHANGELOG records the measurements.
-        conditioning_mode = "concat" if condition_obs is not None else "none"
-        if not np.isfinite(nuisance_ridge) or nuisance_ridge < 0:
-            raise ValueError("nuisance_ridge must be finite and >= 0")
+        if batch_integration_mode is not _MODE_UNSET and batch_integration_mode not in _BATCH_MODES:
+            raise ValueError(
+                f"batch_integration_mode must be one of 'encoder', 'decoder', 'both', "
+                f"got {batch_integration_mode!r}"
+            )
+        if batch_key is None:
+            if batch_integration_mode is not _MODE_UNSET:
+                raise ValueError(
+                    f"batch_integration_mode={batch_integration_mode!r} was given without a "
+                    "batch_key, so there is no covariate to integrate over. Pass "
+                    "batch_key, or drop the mode."
+                )
+            batch_columns: list[str] | None = None
+            batch_mode = "none"
+        else:
+            batch_columns = [batch_key] if isinstance(batch_key, str) else list(batch_key)
+            if not batch_columns:
+                raise ValueError("batch_key must name at least one obs column")
+            batch_mode = "both" if batch_integration_mode is _MODE_UNSET else batch_integration_mode
+        conditions_decoder, regresses_encoder = _BATCH_MODES[batch_mode]
+        nuisance_ridge = self.config.nuisance_ridge
         if stability_selection not in (None, False, True, "subsample", "iteration"):
             raise ValueError(
                 "stability_selection must be None, 'subsample' or 'iteration', "
@@ -1792,38 +1855,28 @@ class BAE(nn.Module):
             else None
         )
 
-        # --- Separate decoder conditioning and boosting nuisance covariates ---
-        self._obs_encoding = None
-        self._condition_encoding = None
-        self._nuisance_encoding = None
-        self._conditioning_mode = conditioning_mode
+        # --- Batch covariates: one encoding, two mechanisms it can drive ---
+        self._batch_encoding = None
+        self._batch_integration_mode = batch_mode
         D_condition: torch.Tensor | None = None
         D_nuisance_np: np.ndarray | None = None
         n_nuisance = 0
-        if condition_obs is not None or nuisance_obs is not None:
+        if batch_columns is not None:
             from ._utils import encode_obs_covariates
 
-            if condition_obs is not None:
-                self._condition_encoding = encode_obs_covariates(adata, condition_obs)
-                condition_np = self._condition_encoding.encoded.astype(np.float32)
+            self._batch_encoding = encode_obs_covariates(adata, batch_columns)
+            if conditions_decoder:
+                condition_np = self._batch_encoding.encoded.astype(np.float32)
                 D_condition = torch.from_numpy(condition_np).to(self.config.device)
-            if nuisance_obs is not None:
-                if condition_obs == nuisance_obs and self._condition_encoding is not None:
-                    self._nuisance_encoding = self._condition_encoding
-                else:
-                    self._nuisance_encoding = encode_obs_covariates(adata, nuisance_obs)
-                D_nuisance_np = self._nuisance_encoding.encoded.astype(np.float32)
-                n_nuisance = self._nuisance_encoding.n_columns
-            # Kept as a read-only compatibility alias for downstream code.
-            self._obs_encoding = self._condition_encoding
+            if regresses_encoder:
+                D_nuisance_np = self._batch_encoding.encoded.astype(np.float32)
+                n_nuisance = self._batch_encoding.n_columns
 
         # Always rebuild so repeated fits cannot retain a stale conditioning shape.
         decoder_input = (
             2 * self.config.latent_dim if self.config.split_softmax else self.config.latent_dim
         )
-        n_condition = (
-            self._condition_encoding.n_columns if self._condition_encoding is not None else 0
-        )
+        n_condition = self._batch_encoding.n_columns if conditions_decoder else 0
         self.decoder = BAEDecoder(
             self.n_genes,
             self.config,
@@ -1918,7 +1971,7 @@ class BAE(nn.Module):
         patience_counter = 0
         best_encoder_weights = None
         best_decoder_state = None
-        best_nuisance_weights = None
+        best_batch_weights = None
 
         # Training loop
         self._training_history = {"train_loss": [], "selection_loss": []}
@@ -2012,9 +2065,7 @@ class BAE(nn.Module):
 
             # Extract gene weights only; obs weights are nuisance (discarded)
             W_genes = betamat[:, : self.n_genes]
-            nuisance_weights = (
-                betamat[:, self.n_genes :].copy() if D_nuisance_np is not None else None
-            )
+            batch_weights = betamat[:, self.n_genes :].copy() if D_nuisance_np is not None else None
             W = torch.from_numpy(W_genes.astype(np.float32)).to(self.config.device)
             self.encoder.set_weights(W)
 
@@ -2057,7 +2108,7 @@ class BAE(nn.Module):
                 patience_counter = 0
                 best_encoder_weights = self.encoder.linear.weight.detach().clone()
                 best_decoder_state = {k: v.clone() for k, v in self.decoder.state_dict().items()}
-                best_nuisance_weights = nuisance_weights
+                best_batch_weights = batch_weights
             else:
                 patience_counter += 1
 
@@ -2099,9 +2150,8 @@ class BAE(nn.Module):
             self.encoder.set_weights(best_encoder_weights)
         if best_decoder_state is not None:
             self.decoder.load_state_dict(best_decoder_state)
-        self._nuisance_weights = best_nuisance_weights
+        self._batch_weights = best_batch_weights
         self._balance_obs = balance_obs
-        self._nuisance_ridge = nuisance_ridge
 
         self._is_fitted = True
 
@@ -2121,6 +2171,16 @@ class BAE(nn.Module):
         if stability_selection:
             self.stability_selection(adata, mode=stability_selection, verbose=verbose)
         return self
+
+    @property
+    def _conditions_decoder(self) -> bool:
+        """Whether the batch covariate is concatenated to the decoder input."""
+        return _BATCH_MODES[self._batch_integration_mode][0]
+
+    @property
+    def _regresses_encoder(self) -> bool:
+        """Whether the batch covariate enters the boosting design as a regressor."""
+        return _BATCH_MODES[self._batch_integration_mode][1]
 
     def _resolve_layer(self, layer: str | None | _FitLayer) -> str | None:
         """Resolve a per-call ``layer`` override against the fit-time layer."""
@@ -2180,7 +2240,7 @@ class BAE(nn.Module):
         ----------
         adata
             AnnData object with expression and, when applicable, the fitted
-            ``condition_obs`` columns.
+            batch columns, when the mode conditions the decoder.
         layer
             Where to read expression from. Defaults to the layer the model was
             fitted on. Pass a name to override, or ``None`` to force ``adata.X``.
@@ -2198,10 +2258,10 @@ class BAE(nn.Module):
 
         self._warn_on_panel_mismatch(adata, "reconstruct")
         D: torch.Tensor | None = None
-        if self._condition_encoding is not None:
+        if self._conditions_decoder:
             from ._utils import transform_obs_covariates
 
-            encoded = transform_obs_covariates(adata, self._condition_encoding)
+            encoded = transform_obs_covariates(adata, self._batch_encoding)
             D = self._to_tensor(encoded, self.config.device)
         matrix = _expression_matrix(adata, self._resolve_layer(layer))
         X = self._to_tensor(matrix, self.config.device)
@@ -2301,9 +2361,9 @@ class BAE(nn.Module):
         X_train = self._to_tensor(X_np, self.config.device)
 
         D_condition = None
-        if self._condition_encoding is not None:
+        if self._conditions_decoder:
             D_condition = self._to_tensor(
-                transform_obs_covariates(adata, self._condition_encoding), self.config.device
+                transform_obs_covariates(adata, self._batch_encoding), self.config.device
             )
         raw_weights = self._balance_weights(adata, self._balance_obs)
         sample_weights = (
@@ -2314,16 +2374,16 @@ class BAE(nn.Module):
 
         sourcemat_aug = X_np.astype(np.float64)
         n_nuisance = 0
-        if self._nuisance_encoding is not None:
-            D_nuisance = transform_obs_covariates(adata, self._nuisance_encoding)
+        if self._regresses_encoder:
+            D_nuisance = transform_obs_covariates(adata, self._batch_encoding)
             sourcemat_aug = np.hstack([sourcemat_aug, np.asarray(D_nuisance, dtype=np.float64)])
-            n_nuisance = self._nuisance_encoding.n_columns
+            n_nuisance = self._batch_encoding.n_columns
 
         resolved_mandatory = resolve_mandatory_genes(self._mandatory_genes, adata)
         allboost_mandatory = _build_allboost_mandatory(resolved_mandatory, n_nuisance, self.n_genes)
         mandatory_ridge = np.zeros(sourcemat_aug.shape[1], dtype=np.float64)
         if n_nuisance:
-            mandatory_ridge[self.n_genes :] = self._nuisance_ridge
+            mandatory_ridge[self.n_genes :] = self.config.nuisance_ridge
 
         # Snapshot so the fitted model is unchanged when this returns.
         saved_encoder = self.encoder.linear.weight.detach().clone()
@@ -2671,9 +2731,9 @@ class BAE(nn.Module):
         # Rebuild the same covariate context the encoder was fitted under, so the
         # resampled selection problem is the one the model actually solved.
         D_condition = None
-        if self._condition_encoding is not None:
+        if self._conditions_decoder:
             D_condition = self._to_tensor(
-                transform_obs_covariates(adata, self._condition_encoding), self.config.device
+                transform_obs_covariates(adata, self._batch_encoding), self.config.device
             )
         weights_np = self._balance_weights(adata, self._balance_obs)
         weights_t = (
@@ -2689,16 +2749,16 @@ class BAE(nn.Module):
 
         sourcemat = X_np.astype(np.float64)
         n_nuisance = 0
-        if self._nuisance_encoding is not None:
-            D_nuisance = transform_obs_covariates(adata, self._nuisance_encoding)
+        if self._regresses_encoder:
+            D_nuisance = transform_obs_covariates(adata, self._batch_encoding)
             sourcemat = np.hstack([sourcemat, np.asarray(D_nuisance, dtype=np.float64)])
-            n_nuisance = self._nuisance_encoding.n_columns
+            n_nuisance = self._batch_encoding.n_columns
 
         resolved_mandatory = resolve_mandatory_genes(self._mandatory_genes, adata)
         mandatory = _build_allboost_mandatory(resolved_mandatory, n_nuisance, self.n_genes)
         mandatory_ridge = np.zeros(sourcemat.shape[1], dtype=np.float64)
         if n_nuisance:
-            mandatory_ridge[self.n_genes :] = self._nuisance_ridge
+            mandatory_ridge[self.n_genes :] = self.config.nuisance_ridge
 
         result = _run_stability(
             sourcemat,
@@ -2944,11 +3004,11 @@ class BAE(nn.Module):
         prior_dims = self._prior_weights.shape[1]
 
         covariates = None
-        if self._condition_encoding is not None:
+        if self._conditions_decoder:
             from ._utils import transform_obs_covariates
 
             covariates = self._to_tensor(
-                transform_obs_covariates(adata, self._condition_encoding), self.config.device
+                transform_obs_covariates(adata, self._batch_encoding), self.config.device
             )
 
         def reconstruction_mse(weights: torch.Tensor) -> float:
@@ -3028,7 +3088,7 @@ class BAE(nn.Module):
         unconditionally: the hazard is real but conditional, so a caller whose
         integration survives is never nagged.
         """
-        encoding = self._nuisance_encoding or self._condition_encoding
+        encoding = self._batch_encoding
         if encoding is None:
             return
         from ._utils import transform_obs_covariates
@@ -3168,8 +3228,8 @@ class BAE(nn.Module):
         from ._utils import transform_obs_covariates
 
         D_all = None
-        if self._condition_encoding is not None:
-            D_all = transform_obs_covariates(adata, self._condition_encoding)
+        if self._conditions_decoder:
+            D_all = transform_obs_covariates(adata, self._batch_encoding)
 
         X = _expression_matrix(adata, self._layer)
         col_means = np.asarray(X.mean(axis=0)).ravel()
@@ -3261,19 +3321,16 @@ class BAE(nn.Module):
             uns_dict["training_report"] = self._training_report.to_dict()
         if hasattr(self, "_mandatory_genes") and self._mandatory_genes is not None:
             uns_dict["mandatory_genes"] = _mandatory_genes_for_uns(self._mandatory_genes)
-        uns_dict["conditioning_mode"] = self._conditioning_mode
-        if self._condition_encoding is not None:
-            uns_dict["condition_obs"] = self._condition_encoding.obs_columns
-            uns_dict["condition_columns"] = self._condition_encoding.encoded_columns
-        if self._nuisance_encoding is not None:
-            uns_dict["nuisance_obs"] = self._nuisance_encoding.obs_columns
-            uns_dict["nuisance_columns"] = self._nuisance_encoding.encoded_columns
-        if self._nuisance_weights is not None:
-            uns_dict["nuisance_weights"] = self._nuisance_weights
-            uns_dict["nuisance_ridge"] = self._nuisance_ridge
+        uns_dict["batch_integration_mode"] = self._batch_integration_mode
+        if self._batch_encoding is not None:
+            uns_dict["batch_key"] = self._batch_encoding.obs_columns
+            uns_dict["batch_columns"] = self._batch_encoding.encoded_columns
+        if self._batch_weights is not None:
+            uns_dict["batch_weights"] = self._batch_weights
+            uns_dict["nuisance_ridge"] = self.config.nuisance_ridge
         if self._balance_obs is not None:
             uns_dict["balance_obs"] = self._balance_obs
-        diagnostic_encoding = self._nuisance_encoding or self._condition_encoding
+        diagnostic_encoding = self._batch_encoding
         if diagnostic_encoding is not None:
             from ._utils import transform_obs_covariates
 
@@ -3291,10 +3348,8 @@ class BAE(nn.Module):
             uns_dict["latent_obs_r2_per_dim"] = 1.0 - latent_r2
 
         group_columns = set()
-        if self._condition_encoding is not None:
-            group_columns.update(self._condition_encoding.obs_columns)
-        if self._nuisance_encoding is not None:
-            group_columns.update(self._nuisance_encoding.obs_columns)
+        if self._batch_encoding is not None:
+            group_columns.update(self._batch_encoding.obs_columns)
         if self._balance_obs is not None:
             group_columns.add(self._balance_obs)
         if group_columns:

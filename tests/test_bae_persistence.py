@@ -106,38 +106,34 @@ def test_round_trip_preserves_conditioning(tmp_path):
     from structboost import BAE
 
     adata = _adata()
-    model, _ = _fit(
-        adata=adata, condition_obs=["batch"], nuisance_obs=["donor"], nuisance_ridge=0.5
-    )
+    model, _ = _fit(adata=adata, batch_key=["batch", "donor"])
     reconstruction = model.reconstruct(adata)
 
     loaded = BAE.load(model.save(tmp_path / "model.pt"))
 
     np.testing.assert_array_equal(loaded.reconstruct(adata), reconstruction)
-    assert loaded._condition_encoding.obs_columns == ["batch"]
-    assert loaded._nuisance_encoding.obs_columns == ["donor"]
-    assert loaded._condition_encoding.encoded_columns == model._condition_encoding.encoded_columns
-    assert loaded._conditioning_mode == model._conditioning_mode
-    assert loaded._nuisance_ridge == 0.5
-    np.testing.assert_allclose(loaded._nuisance_weights, model._nuisance_weights)
+    assert loaded._batch_encoding.obs_columns == ["batch", "donor"]
+    assert loaded._batch_encoding.encoded_columns == model._batch_encoding.encoded_columns
+    assert loaded._batch_integration_mode == model._batch_integration_mode == "both"
+    np.testing.assert_allclose(loaded._batch_weights, model._batch_weights)
     # The training design matrix is deliberately not persisted.
-    assert loaded._condition_encoding.encoded.shape == (0, model._condition_encoding.n_columns)
+    assert loaded._batch_encoding.encoded.shape == (0, model._batch_encoding.n_columns)
 
 
-def test_shared_condition_and_nuisance_encoding_stays_one_object(tmp_path):
+@pytest.mark.parametrize("mode", ["encoder", "decoder", "both"])
+def test_round_trip_preserves_every_mode(tmp_path, mode):
+    """Each mode must restore to a model that reconstructs identically."""
     _require_deps()
     from structboost import BAE
 
-    model, _ = _fit(condition_obs=["batch"], nuisance_obs=["batch"])
-    assert model._nuisance_encoding is model._condition_encoding
+    adata = _adata()
+    model, _ = _fit(adata=adata, batch_key="batch", batch_integration_mode=mode)
+    reconstruction = model.reconstruct(adata)
 
-    loaded = BAE.load(model.save(tmp_path / "model.pt"))
+    loaded = BAE.load(model.save(tmp_path / f"{mode}.pt"))
 
-    # `fit` stores one shared object rather than two equal ones, and a restored
-    # model should be indistinguishable from the fitted one — identity included,
-    # so equality alone is not enough here.
-    assert loaded._nuisance_encoding is loaded._condition_encoding
-    assert loaded._obs_encoding is loaded._condition_encoding
+    assert loaded._batch_integration_mode == mode
+    np.testing.assert_array_equal(loaded.reconstruct(adata), reconstruction)
 
 
 def test_non_string_categorical_levels_survive(tmp_path):
@@ -151,7 +147,7 @@ def test_non_string_categorical_levels_survive(tmp_path):
     adata.obs["plate"] = pd.Categorical(rng.choice([1, 2, 3], size=adata.n_obs))
     adata.obs["treated"] = rng.choice([True, False], size=adata.n_obs)
 
-    model, _ = _fit(adata=adata, condition_obs=["plate", "treated"])
+    model, _ = _fit(adata=adata, batch_key=["plate", "treated"], batch_integration_mode="decoder")
     reconstruction = model.reconstruct(adata)
 
     loaded = BAE.load(model.save(tmp_path / "model.pt"))
@@ -159,9 +155,9 @@ def test_non_string_categorical_levels_survive(tmp_path):
     # If the levels came back as strings, `transform_obs_covariates` would either
     # raise "levels not seen during fitting" or dummy-encode every cell to zero.
     np.testing.assert_array_equal(loaded.reconstruct(adata), reconstruction)
-    assert loaded._condition_encoding.column_info["plate"]["categories"] == [1, 2, 3]
-    assert loaded._condition_encoding.column_info["treated"]["categories"] == [
-        bool(v) for v in model._condition_encoding.column_info["treated"]["categories"]
+    assert loaded._batch_encoding.column_info["plate"]["categories"] == [1, 2, 3]
+    assert loaded._batch_encoding.column_info["treated"]["categories"] == [
+        bool(v) for v in model._batch_encoding.column_info["treated"]["categories"]
     ]
 
 
@@ -174,7 +170,7 @@ def test_unpersistable_categorical_level_type_is_rejected_at_save(tmp_path):
         pd.to_datetime(["2026-01-01", "2026-02-01"] * (adata.n_obs // 2))
     )
 
-    model, _ = _fit(adata=adata, condition_obs=["collected"])
+    model, _ = _fit(adata=adata, batch_key=["collected"], batch_integration_mode="decoder")
 
     with pytest.raises(ValueError, match="collected"):
         model.save(tmp_path / "model.pt")
@@ -252,7 +248,9 @@ def test_checkpoint_loads_without_arbitrary_code_execution(tmp_path):
     _require_deps()
     import torch
 
-    model, _ = _fit(condition_obs=["batch"], config=_config(diagnostics=True))
+    model, _ = _fit(
+        batch_key="batch", batch_integration_mode="decoder", config=_config(diagnostics=True)
+    )
     path = model.save(tmp_path / "model.pt")
 
     # Pins the safety property: the payload must stay free of pickled objects

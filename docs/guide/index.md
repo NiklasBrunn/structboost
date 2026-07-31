@@ -44,10 +44,11 @@ support, and neither stability mode gives you usable error control.
 
 ### Handling batches and unwanted covariates
 
-Two independent mechanisms, deliberately not coupled: `condition_obs` gives the
-covariate to the decoder, `nuisance_obs` regresses it out inside the boosting
-fit so it cannot confound gene selection. A third, `balance_obs`, reweights
-groups, with an important limit on how far that reweighting reaches.
+Name the covariate once with `batch_key`, and `batch_integration_mode` decides
+which of two mechanisms act on it: giving it to the decoder, regressing it out
+inside the boosting fit so it cannot confound gene selection, or both, which is
+the default. A separate `balance_obs` reweights groups, with an important limit
+on how far that reweighting reaches.
 
 `transform` stays gene-only and needs no batch labels. That is what makes the
 encoder deployable on data with no covariate annotation.

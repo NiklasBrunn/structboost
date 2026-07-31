@@ -68,6 +68,7 @@ enough capacity for genuinely nonlinear structure.
 | `boosting_nu` | `0.1` | Boosting learning rate. |
 | `boosting_csf` | `0.9` | `<1` promotes diversity, `>1` reinforces selected features. |
 | `boosting_independent` | `True` | Reset boosting state per latent dimension. |
+| `nuisance_ridge` | `0.0` | Stabilizes near-collinear batch covariates. See {doc}`batch-integration`. |
 
 These defaults replaced an earlier `0.3` / `100` pairing, which over-selected
 badly: marker-recovery F1 of 0.72/0.97/0.57 across three

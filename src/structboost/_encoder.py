@@ -37,10 +37,10 @@ class BAEEncoder(nn.Module):
     Weights are optimized via componentwise boosting (not gradient descent).
 
     The encoder maps only gene expression to latent space: z = W @ x.
-    Obs covariates never modify z: ``nuisance_obs`` enters the model as
-    mandatory nuisance regressors in allboost, and ``condition_obs`` as decoder
-    conditioning inputs. That is what keeps the encoder deployable on data
-    carrying no covariate labels.
+    Obs covariates never modify z. Depending on ``batch_integration_mode`` the
+    encoded covariate enters allboost as a mandatory regressor, or the decoder as
+    a conditioning input, or both, but never this layer. That is what keeps the
+    encoder deployable on data carrying no covariate labels.
 
     Parameters
     ----------

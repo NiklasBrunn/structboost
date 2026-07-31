@@ -441,7 +441,7 @@ def test_batch_nuisance_applies_to_the_novel_dimensions():
     adata = _adata()
     adata.obs["batch"] = ["b0", "b1"] * (adata.n_obs // 2)
     ref = BAE(adata.n_vars, _config())
-    ref.fit(adata.copy(), verbose=False, condition_obs=["batch"], nuisance_obs=["batch"])
+    ref.fit(adata.copy(), verbose=False, batch_key="batch")
 
     work = adata.copy()
     model = BAE.from_reference(ref, work, n_additional_dims=2)
@@ -449,8 +449,7 @@ def test_batch_nuisance_applies_to_the_novel_dimensions():
         work,
         verbose=False,
         decoder_warmup_epochs=3,
-        condition_obs=["batch"],
-        nuisance_obs=["batch"],
+        batch_key="batch",
     )
 
     z = work.obsm["X_bae"][:, 4:]

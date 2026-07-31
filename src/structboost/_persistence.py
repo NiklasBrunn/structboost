@@ -42,9 +42,15 @@ MAGIC = "structboost.bae"
 #:
 #: 2 — added ``layer``. The bump is for *forward* compatibility: an older install
 #: would ignore the key and silently read ``adata.X`` instead of the layer the
-#: model was fitted on, which is a wrong answer rather than a missing one. Format
-#: 1 checkpoints still load here, as ``layer=None``, which is what they were.
-CHECKPOINT_FORMAT = 2
+#: model was fitted on, which is a wrong answer rather than a missing one.
+#:
+#: 3 — the two covariate encodings became one, alongside the ``batch_key`` /
+#: ``batch_integration_mode`` API. Formats 1 and 2 predate the first public
+#: release, so no migration is written and the loader refuses them by name
+#: rather than failing on a missing key.
+CHECKPOINT_FORMAT = 3
+#: Oldest format this install can read.
+MIN_CHECKPOINT_FORMAT = 3
 
 #: Category element types that survive the round trip with their comparison
 #: semantics intact. ``bool`` precedes ``int`` because ``bool`` is a subclass of
@@ -229,17 +235,9 @@ def build_payload(model: BAE) -> dict[str, Any]:
             None if report is None else {k: _tensor(v) for k, v in report.to_dict().items()}
         ),
         "latent_init": _to_primitive(model._latent_init),
-        "condition_encoding": _encode_encoding(model._condition_encoding),
-        "nuisance_encoding": _encode_encoding(model._nuisance_encoding),
-        # When one obs column set serves as both, `fit` stores a single shared
-        # object rather than two equal ones. Recorded explicitly so the restored
-        # model is indistinguishable from the fitted one, identity included.
-        "nuisance_is_condition": model._nuisance_encoding is model._condition_encoding,
-        "conditioning_mode": str(model._conditioning_mode),
-        "nuisance_weights": (
-            None if model._nuisance_weights is None else _tensor(model._nuisance_weights)
-        ),
-        "nuisance_ridge": float(model._nuisance_ridge),
+        "batch_encoding": _encode_encoding(model._batch_encoding),
+        "batch_integration_mode": str(model._batch_integration_mode),
+        "batch_weights": (None if model._batch_weights is None else _tensor(model._batch_weights)),
         "balance_obs": model._balance_obs,
         "mandatory_genes": _to_primitive(model._mandatory_genes),
         "prior_weights": None if prior is None else _tensor(prior),
@@ -294,17 +292,10 @@ def restore_payload(cls: type[BAE], payload: dict[str, Any], device: Any) -> BAE
     )
     model._latent_init = dict(payload["latent_init"])
 
-    model._condition_encoding = _decode_encoding(payload["condition_encoding"])
-    if payload["nuisance_is_condition"]:
-        model._nuisance_encoding = model._condition_encoding
-    else:
-        model._nuisance_encoding = _decode_encoding(payload["nuisance_encoding"])
-    model._obs_encoding = model._condition_encoding
-
-    model._conditioning_mode = payload["conditioning_mode"]
-    nuisance_weights = payload["nuisance_weights"]
-    model._nuisance_weights = None if nuisance_weights is None else _array(nuisance_weights)
-    model._nuisance_ridge = float(payload["nuisance_ridge"])
+    model._batch_encoding = _decode_encoding(payload["batch_encoding"])
+    model._batch_integration_mode = payload["batch_integration_mode"]
+    batch_weights = payload["batch_weights"]
+    model._batch_weights = None if batch_weights is None else _array(batch_weights)
     model._balance_obs = payload["balance_obs"]
     model._mandatory_genes = payload["mandatory_genes"]
 

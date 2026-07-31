@@ -1146,7 +1146,7 @@ def test_bae_per_dimension_mandatory_genes_survive_h5ad(tmp_path):
 
 
 def test_bae_fit_mandatory_genes_and_obs():
-    """BAE.fit() with both mandatory_genes and condition_obs/nuisance_obs."""
+    """BAE.fit() with both mandatory_genes and a batch_key."""
     _require_bae_deps()
     import anndata as ad
     import pandas as pd
@@ -1170,8 +1170,7 @@ def test_bae_fit_mandatory_genes_and_obs():
     model.fit(
         adata,
         mandatory_genes=[0, 1],
-        condition_obs=["batch"],
-        nuisance_obs=["batch"],
+        batch_key="batch",
         verbose=False,
     )
 
@@ -1184,7 +1183,7 @@ def test_bae_fit_mandatory_genes_and_obs():
 
 
 def test_bae_transform_with_obs():
-    """BAE.transform() works when model was fitted with condition_obs/nuisance_obs."""
+    """BAE.transform() works when the model was fitted with a batch_key."""
     _require_bae_deps()
     import anndata as ad
     import pandas as pd
@@ -1205,7 +1204,7 @@ def test_bae_transform_with_obs():
         seed=42,
     )
     model = BAE(n_genes=n_genes, config=config)
-    model.fit(adata, condition_obs=["batch"], nuisance_obs=["batch"], verbose=False)
+    model.fit(adata, batch_key="batch", verbose=False)
 
     # Transform new data with same obs columns
     adata_new = ad.AnnData(
@@ -1218,7 +1217,7 @@ def test_bae_transform_with_obs():
 
 
 def test_bae_fit_obs_conditioning_with_split_softmax():
-    """condition_obs/nuisance_obs works with split_softmax=True."""
+    """Batch integration works with split_softmax=True."""
     _require_bae_deps()
     import anndata as ad
     import pandas as pd
@@ -1240,7 +1239,7 @@ def test_bae_fit_obs_conditioning_with_split_softmax():
         seed=42,
     )
     model = BAE(n_genes=n_genes, config=config)
-    model.fit(adata, condition_obs=["batch"], nuisance_obs=["batch"], verbose=False)
+    model.fit(adata, batch_key="batch", verbose=False)
 
     assert adata.obsm["X_bae"].shape == (n_cells, 4)
 
@@ -1267,7 +1266,7 @@ def test_bae_transform_is_gene_only_and_reconstruct_requires_obs():
         seed=42,
     )
     model = BAE(n_genes=n_genes, config=config)
-    model.fit(adata, condition_obs=["batch"], nuisance_obs=["batch"], verbose=False)
+    model.fit(adata, batch_key="batch", verbose=False)
 
     # New data WITHOUT the fitted obs column can still be embedded.
     adata_new = ad.AnnData(rng.normal(size=(8, n_genes)).astype(np.float32))
@@ -1302,16 +1301,14 @@ def test_bae_separate_batch_paths():
     model = BAE(20, config)
     model.fit(
         adata,
-        condition_obs=["batch"],
-        nuisance_obs=["batch"],
+        batch_key="batch",
         verbose=False,
     )
 
     assert model.reconstruct(adata).shape == x.shape
-    assert adata.uns["bae"]["condition_obs"] == ["batch"]
-    assert adata.uns["bae"]["nuisance_obs"] == ["batch"]
-    assert adata.uns["bae"]["nuisance_weights"].shape == (3, 1)
-    assert adata.uns["bae"]["conditioning_mode"] == "concat"
+    assert adata.uns["bae"]["batch_key"] == ["batch"]
+    assert adata.uns["bae"]["batch_weights"].shape == (3, 1)
+    assert adata.uns["bae"]["batch_integration_mode"] == "both"
 
 
 def test_bae_nuisance_only_needs_no_obs_for_reconstruction():
@@ -1336,12 +1333,12 @@ def test_bae_nuisance_only_needs_no_obs_for_reconstruction():
             seed=2,
         ),
     )
-    model.fit(adata, nuisance_obs=["batch"], verbose=False)
+    model.fit(adata, batch_key="batch", batch_integration_mode="encoder", verbose=False)
     without_obs = ad.AnnData(x.copy())
     assert model.reconstruct(without_obs).shape == x.shape
 
 
-def test_bae_balance_obs_and_nuisance_ridge_metadata():
+def test_bae_balance_obs_and_ridge_metadata():
     _require_bae_deps()
     import anndata as ad
     import pandas as pd
@@ -1362,12 +1359,13 @@ def test_bae_balance_obs_and_nuisance_ridge_metadata():
             max_iterations=1,
             enable_early_stopping=False,
             seed=3,
+            nuisance_ridge=0.1,
         ),
     )
     model.fit(
         adata,
-        nuisance_obs=["batch"],
-        nuisance_ridge=0.1,
+        batch_key="batch",
+        batch_integration_mode="encoder",
         balance_obs="batch",
         verbose=False,
     )
