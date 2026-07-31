@@ -1,0 +1,115 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "structboost"
+version = "0.1.0"
+description = "Boosting Autoencoders (BAE) and componentwise L2 boosting utilities for scverse-style workflows."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Niklas Brunn" }]
+keywords = ["scverse", "single-cell", "boosting", "autoencoder", "gene-selection", "dimensionality-reduction"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "numpy>=1.23",
+]
+
+[project.optional-dependencies]
+# Torch/AnnData integration for BAE (kept optional)
+bae = [
+  "torch>=2",
+  "scipy>=1.10",
+  "anndata>=0.10",
+  "tqdm>=4.60",
+  "pandas>=1.5",
+]
+# Lightweight plotting helpers (imported lazily)
+plot = [
+  "matplotlib>=3.7",
+]
+# Parquet encoder-weight files (imported lazily; CSV needs only pandas)
+io = [
+  "pandas>=1.5",
+  "pyarrow>=12",
+]
+test = [
+  "pytest>=7.4",
+]
+dev = [
+  "pre-commit>=3.6",
+  # Bounded: ruff changes formatting between minors (0.16 turned on Markdown
+  # code-block formatting by default), which silently broke CI while local
+  # installs lagged. Keep CI and developers on the same minor.
+  "ruff>=0.16,<0.17",
+]
+docs = [
+  "sphinx>=7.2",
+  "myst-parser>=2.0",
+  "furo>=2024.1.29",
+  "sphinx-design>=0.5",
+  "sphinx-copybutton>=0.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/NiklasBrunn/structboost"
+Repository = "https://github.com/NiklasBrunn/structboost"
+Issues = "https://github.com/NiklasBrunn/structboost/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/structboost"]
+
+[tool.hatch.build.targets.sdist]
+# Downstream packagers (conda-forge, Debian) run the test suite at build time,
+# so the sdist has to carry it. The community files travel with it too: an sdist
+# is what some users see instead of the repository.
+include = [
+  "src/structboost",
+  "tests",
+  "README.md",
+  "CHANGELOG.md",
+  "CONTRIBUTING.md",
+  "CODE_OF_CONDUCT.md",
+  "CITATION.cff",
+  "LICENSE",
+  "pyproject.toml",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = [
+  "examples",
+  "*.ipynb",
+  "docs/_build",
+  # Kept out of the package repo, but present in working checkouts.
+  "benchmarks",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+  "slow: marks tests as slow (select with '-m slow')",
+]

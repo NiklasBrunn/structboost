@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# uv is used here only as a faster drop-in installer/resolver. The project is
+# built with Hatchling and installed from PyPI by end users with plain pip;
+# nothing here changes that. `uv pip install --system` targets the interpreter
+# actions/setup-python provisions, so the test matrix still runs on each version.
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv pip install --system -e ".[dev,test]"
+      - name: Ruff
+        run: |
+          ruff check .
+          ruff format --check .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv pip install --system -e ".[test,bae]"
+      - name: Pytest
+        run: pytest -q
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      # The runtime extras are required, not optional: autodoc imports the
+      # package to read its docstrings, and without torch/anndata/pandas it
+      # cannot import `structboost._model` at all. Installing `[docs]` alone
+      # silently produced a site with no BAE documentation in it.
+      - name: Install
+        run: uv pip install --system -e ".[bae,plot,io,docs]"
+      # `-W` makes a documentation regression fail the build the way a lint
+      # error does. `--keep-going` reports every problem rather than the first.
+      - name: Build docs
+        run: python -m sphinx -b html -W --keep-going docs docs/_build/html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/_build/html
+
+  # Publishes to https://niklasbrunn.github.io/structboost on pushes to main.
+  # Requires Pages to be enabled for the repository with "GitHub Actions" as the
+  # source; until then this job is skipped and the build above still gates.
+  deploy-docs:
+    needs: docs
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

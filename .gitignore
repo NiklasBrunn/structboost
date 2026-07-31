@@ -1,0 +1,107 @@
+__pycache__/
+*.py[cod]
+*.pyd
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+.venv/
+venv/
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Environment
+.env
+*.env.local
+
+# PyTorch
+*.pt
+*.pth
+runs/
+lightning_logs/
+
+# Data (large files)
+*.h5ad
+data/
+https:/
+
+# Notebooks and scratch scripts. Kept local while a clean tutorial set is
+# written: the existing notebooks store their outputs, so 96% of their bytes are
+# base64 images and every re-execution added megabytes to history permanently.
+examples/
+
+# Agents. Skills stay local for now: they are tooling around the package, not
+# part of it, and the package repo is being kept to what ships.
+agent_instructions_logs/
+agent_instructions/
+CLAUDE.md
+AGENTS.md
+docs/plans/
+.claude/
+.codex/
+
+# Agent transcript history
+agent_transcript_history/
+
+# Documentation build output. `docs/api/generated/` is autosummary output,
+# regenerated on every build -- tracking it produced spurious diffs.
+docs/_build/
+docs/api/generated/
+docs/generated/
+
+# Julia code implementations
+julia_componentwise_boosting_functions/
+.juliaup_home/
+.juliaup_home_test/
+.julia_depot_test/
+.julia_depot_bench_sandbox/
+.julia_depot_nb/
+.julia_depot/
+
+# Benchmark outputs
+benchmarks/bool_allboost/results/*.csv
+benchmarks/bool_allboost/figures/*.png
+
+# Numba JIT cache artifacts (v8 uses @njit(cache=True))
+benchmarks/bool_allboost/versions/**/*.nbi
+benchmarks/bool_allboost/versions/**/*.nbc
+
+# Cython build artifacts for bool_allboost v9
+benchmarks/bool_allboost/versions/_v9_kernel.c
+benchmarks/bool_allboost/versions/_v9_kernel*.so
+benchmarks/bool_allboost/versions/build/
+
+# Manuscript work. Separate lifecycle from the package; belongs in its own repo.
+paper_analysis/
+PAPER_PLAN.md
+
+# Design notes for work that is not implemented yet. Publishing them would
+# advertise behaviour the package does not have; move into docs/ when it lands.
+SCALING.md
+BAE_TARGET_SCALING.md
+
+# Binary-predictor boosting, held back from the initial package. It is the
+# intended encoder fitter for a planned Bernoulli BAE variant and is not wired
+# into BAE.fit, so it ships with nothing and is kept local until that lands.
+src/structboost/_bool_boosting.py
+tests/test_bool_boosting.py
+
+# Micro-optimization experiments for it, kept out of the package repo too.
+benchmarks/
+# Their equivalence tests go with them. Kept on disk so the local benchmark
+# workflow still runs; they import benchmarks/ and cannot pass in a fresh clone.
+tests/benchmarks/
+tests/test_bool_allboost_shared.py
+tests/test_bool_allboost_bench_equivalence.py
+# Loads .codex/skills/... by path, so it goes wherever the skills go.
+tests/test_explore_bae_results_skill.py

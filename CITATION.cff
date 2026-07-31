@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use structboost in your research, please cite it."
+title: "structboost"
+type: software
+license: MIT
+authors:
+  - family-names: Brunn
+    given-names: Niklas
+repository-code: "https://github.com/NiklasBrunn/structboost"

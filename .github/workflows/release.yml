@@ -1,0 +1,94 @@
+name: Release
+
+# Fires when a version tag is pushed, e.g. `git tag v0.1.0 && git push --tags`.
+# The build job always runs and uploads the sdist+wheel as artifacts, so it is
+# useful even before any package index is wired up. The publish job uses PyPI
+# trusted publishing (OIDC) — no API token is stored in the repo — and is inert
+# until a matching "pending publisher" is configured on TestPyPI for this
+# repository + workflow, so merely adding this file cannot publish anything.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      is-prerelease: ${{ steps.tag.outputs.is-prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Verify tag matches pyproject version
+        id: tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          proj="$(grep -m1 '^version = ' pyproject.toml | sed -E 's/^version = "(.*)"/\1/')"
+          echo "tag=$tag  pyproject=$proj"
+          if [ "$tag" != "$proj" ]; then
+            echo "::error::tag v$tag does not match pyproject version $proj"
+            exit 1
+          fi
+          # PEP 440 pre-release suffixes. A pre-release goes to TestPyPI only, so
+          # `v0.11.0rc1` exercises the whole pipeline without spending a version
+          # number on PyPI, where they can never be reused or deleted.
+          if printf '%s' "$tag" | grep -qE '(a|b|rc)[0-9]+$'; then
+            echo "is-prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "$tag is a pre-release: TestPyPI only"
+          else
+            echo "is-prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "$tag is a final release: TestPyPI and PyPI"
+          fi
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Check metadata
+        run: uvx twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish-testpypi:
+    needs: build
+    runs-on: ubuntu-latest
+    # Trusted publishing needs this permission and a GitHub environment that the
+    # TestPyPI project is configured to trust.
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  # Final releases only. Inert until a "pending publisher" for this repository
+  # and workflow is configured on pypi.org and a `pypi` environment exists here,
+  # so merely having this job cannot publish anything.
+  publish-pypi:
+    needs: build
+    if: needs.build.outputs.is-prerelease == 'false'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
