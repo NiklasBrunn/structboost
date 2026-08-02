@@ -3111,12 +3111,16 @@ class BAE(nn.Module):
             fitted = design @ np.linalg.lstsq(design, centered, rcond=None)[0]
             ss_total = (centered**2).sum(axis=0)
             ss_residual = ((centered - fitted) ** 2).sum(axis=0)
-            r2 = np.divide(
-                1.0 - ss_residual / ss_total,
-                1.0,
-                out=np.zeros_like(ss_total),
-                where=ss_total > 0,
+            # `where=` has to guard the division itself. Writing
+            # `np.divide(1.0 - ss_residual / ss_total, 1.0, where=ss_total > 0)`
+            # evaluates the inner `/` eagerly over every column, so a dead latent
+            # dimension still divides by zero and warns before `where` discards
+            # the result. Same values, no warning.
+            has_variance = ss_total > 0
+            ratio = np.divide(
+                ss_residual, ss_total, out=np.zeros_like(ss_total), where=has_variance
             )
+            r2 = np.where(has_variance, 1.0 - ratio, 0.0)
             return float(np.max(r2))
 
         before = covariate_r2(previous_weights)
