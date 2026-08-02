@@ -1,6 +1,7 @@
 # structboost
 
-> **Early alpha.** The API is still moving and a minor version bump may break it.
+> **Note that this package is under active development.** The API is still
+> moving, and a minor version bump may break it.
 
 **Structured representation learning for single-cell data. A latent space you can
 read gene by gene.**
