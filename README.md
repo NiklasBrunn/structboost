@@ -19,6 +19,19 @@ exactly `X @ varm["BAE_encoder_weights"]`.
 The package also ships `allboost`, the componentwise boosting routine on its own,
 for sparse supervised problems with no autoencoder involved.
 
+## Relation to the original method
+
+This is a scanpy-compatible Python re-implementation of the Boosting Autoencoder
+introduced in [Hackenberg et al. (2025)](https://doi.org/10.1038/s42003-025-07872-9),
+where the method and its componentwise boosting core were developed in Julia.
+
+**Some methodological components differ from the original proposal.** Defaults
+and several parts of the training procedure were re-derived here against
+simulated data with known ground truth, and the measurements behind each are
+recorded in the [user guide](https://niklasbrunn.github.io/structboost/guide/index.html)
+next to the setting they justify. Results from this implementation should
+therefore not be assumed identical to the original paper's.
+
 📖 **[Documentation](https://niklasbrunn.github.io/structboost)** · 
 [User guide](https://niklasbrunn.github.io/structboost/guide/index.html) · 
 [API reference](https://niklasbrunn.github.io/structboost/api/index.html) · 
