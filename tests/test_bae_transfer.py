@@ -111,7 +111,7 @@ def test_from_reference_sets_latent_dim_from_the_prior():
     from structboost import BAE
 
     ref, adata = _reference()
-    model = BAE.from_reference(ref, adata, n_additional_dims=3)
+    model = BAE.from_reference(ref, adata, n_additional_dims=3, config=_transfer_config(3))
     assert model.config.latent_dim == 4 + 3
     assert model.prior_weights.shape == (adata.n_vars, 4)
 
@@ -122,7 +122,7 @@ def test_n_additional_dims_defaults_to_five():
     from structboost import BAE
 
     ref, adata = _reference()
-    model = BAE.from_reference(ref, adata)
+    model = BAE.from_reference(ref, adata, config=_transfer_config(5))
     assert model.n_prior_dims == 4
     assert model.config.latent_dim == 4 + 5
 
@@ -148,6 +148,69 @@ def test_matching_latent_dim_does_not_warn():
         BAE.from_reference(ref, adata, n_additional_dims=2, config=_config(latent_dim=6))
 
 
+def test_from_reference_reports_the_hyperparameters_it_did_not_inherit():
+    """Only `latent_dim` comes from the prior, and the rest going back to defaults
+    is otherwise invisible: it is what made a transfer fit run 1000 iterations
+    behind a reference tuned to 15.
+    """
+    _require_deps()
+    from structboost import BAE
+
+    ref, adata = _reference()
+    with pytest.warns(UserWarning, match="used BAEConfig defaults") as caught:
+        BAE.from_reference(ref, adata, n_additional_dims=2)
+
+    message = str(caught[0].message)
+    # The fields, not the exact sentence. `seed` matters most: an unseeded
+    # transfer off a seeded reference is silently irreproducible.
+    for field in ("boosting_stepno", "max_iterations", "seed"):
+        assert field in message
+    # `latent_dim` is genuinely inherited, so it must never appear as dropped.
+    assert "latent_dim" not in message
+
+
+def test_no_warning_when_the_reference_config_is_already_the_default():
+    """Pins the field diff rather than the `isinstance` gate.
+
+    Warning off the reference *type* alone would fire here too, even though
+    nothing was actually dropped. The config is swapped after fitting so the
+    fixture stays fast: `BAEConfig()` would fit at `max_iterations=1000`.
+    """
+    _require_deps()
+    from dataclasses import replace
+
+    from structboost import BAE
+
+    ref, adata = _reference()
+    ref.config = replace(BAEConfig(), latent_dim=ref.config.latent_dim)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        BAE.from_reference(ref, adata, n_additional_dims=2)
+
+
+def test_a_file_reference_never_warns_about_inheritance(tmp_path):
+    """The asymmetry that ruled out inheriting: a file carries no config.
+
+    Warning here would report a difference against nothing.
+    """
+    _require_deps()
+    pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+    from structboost import BAE, write_encoder_weights
+
+    ref, adata = _reference()
+    path = write_encoder_weights(
+        ref.get_encoder_weights(),
+        tmp_path / "prior.parquet",
+        gene_ids=list(adata.var_names),
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        BAE.from_reference(path, adata.copy(), n_additional_dims=2)
+    assert not [w for w in caught if "used BAEConfig defaults" in str(w.message)]
+
+
 def test_bare_array_is_rejected_as_a_prior():
     _require_deps()
     from structboost import BAE
@@ -166,7 +229,7 @@ def test_prior_aligns_by_gene_name_not_position():
     order = np.random.default_rng(0).permutation(adata.n_vars)
     shuffled = adata[:, order].copy()
 
-    model = BAE.from_reference(ref, shuffled, n_additional_dims=1)
+    model = BAE.from_reference(ref, shuffled, n_additional_dims=1, config=_transfer_config(1))
     expected = ref.get_encoder_weights()[order]
     assert np.allclose(model.prior_weights, expected)
 
@@ -196,7 +259,9 @@ def test_partial_coverage_warns_and_is_recorded():
         f"gone_{i}" if i in dropped else name for i, name in enumerate(adata.var_names)
     ]
     with pytest.warns(UserWarning, match="weight mass"):
-        model = BAE.from_reference(ref, partial, n_additional_dims=1, min_coverage=0.1)
+        model = BAE.from_reference(
+            ref, partial, n_additional_dims=1, min_coverage=0.1, config=_transfer_config(1)
+        )
     coverage = model._prior_info["prior_coverage"]
     assert coverage[0] < 1.0
 
@@ -381,8 +446,8 @@ def test_decoder_warmup_without_a_prior_is_rejected():
             {},
             "standardize_targets",
         ),
-        ({}, {"init_pca": True}, "init_pca"),
-        ({}, {"init_obsm": "X_emb"}, "init_pca"),
+        ({"config": _transfer_config(2)}, {"init_pca": True}, "init_pca"),
+        ({"config": _transfer_config(2)}, {"init_obsm": "X_emb"}, "init_pca"),
     ],
 )
 def test_conflicting_settings_raise(kwargs, fit_kwargs, match):
@@ -402,7 +467,7 @@ def test_panel_mismatch_at_fit_time_raises():
     from structboost import BAE
 
     ref, adata = _reference()
-    model = BAE.from_reference(ref, adata, n_additional_dims=2)
+    model = BAE.from_reference(ref, adata, n_additional_dims=2, config=_transfer_config(2))
     smaller = adata[:, :50].copy()
     with pytest.raises(ValueError, match="aligned to a"):
         model.fit(smaller, verbose=False)
@@ -621,7 +686,9 @@ def test_join_on_forces_a_column_and_validates_it():
     target = adata.copy()
     target.var["my_symbols"] = list(adata.var_names)
 
-    model = BAE.from_reference(ref, target, n_additional_dims=1, join_on="my_symbols")
+    model = BAE.from_reference(
+        ref, target, n_additional_dims=1, join_on="my_symbols", config=_transfer_config(1)
+    )
     assert model._prior_info["join_key"] == "var_names->my_symbols"
 
     with pytest.raises(ValueError, match="not a column of adata.var"):

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import functools
 import warnings
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -591,11 +591,34 @@ class BAE(nn.Module):
                 UserWarning,
                 stacklevel=2,
             )
-        resolved = replace(
-            config or BAEConfig(),
-            latent_dim=latent_dim,
-            **({"prior_mode": prior_mode} if prior_mode is not None else {}),
-        )
+        prior_mode_kw = {"prior_mode": prior_mode} if prior_mode is not None else {}
+        resolved = replace(config or BAEConfig(), latent_dim=latent_dim, **prior_mode_kw)
+        if config is None and isinstance(reference, BAE):
+            # Only `latent_dim` is carried over from the prior, so the call reads
+            # as "the reference plus k dimensions" while every other setting
+            # silently reverts to `BAEConfig()`. A reference tuned to
+            # `max_iterations=200` transfers at 1000 with nothing to show for it.
+            #
+            # Inheriting instead was rejected: a Path or array reference carries
+            # no config, so the same prior would behave differently depending on
+            # whether it was passed as a model or as its exported weights.
+            #
+            # Diffing two `replace` results rather than the raw configs drops
+            # `latent_dim` and `prior_mode` on its own, since both sides force
+            # them identically. No exclusion list to keep in sync.
+            inherited = replace(reference.config, latent_dim=latent_dim, **prior_mode_kw)
+            differing = [
+                (f.name, getattr(inherited, f.name), getattr(resolved, f.name))
+                for f in fields(BAEConfig)
+                if getattr(inherited, f.name) != getattr(resolved, f.name)
+            ]
+            if differing:
+                changes = ", ".join(f"{name} {was!r} -> {now!r}" for name, was, now in differing)
+                warnings.warn(
+                    f"from_reference used BAEConfig defaults, not the reference's: {changes}.",
+                    UserWarning,
+                    stacklevel=2,
+                )
         model = cls(adata.n_vars, resolved)
         model._prior_weights = aligned
         model._prior_info = {

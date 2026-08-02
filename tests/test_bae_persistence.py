@@ -202,7 +202,9 @@ def test_transfer_state_round_trips_and_loaded_model_can_be_a_reference(tmp_path
     np.testing.assert_array_equal(loaded.transform(target), latent)
 
     # `_var_names` is what makes a model usable as a prior; it must survive.
-    downstream = BAE.from_reference(loaded, _adata(seed=4), n_additional_dims=1)
+    downstream = BAE.from_reference(
+        loaded, _adata(seed=4), n_additional_dims=1, config=_config(latent_dim=6)
+    )
     assert downstream.n_prior_dims == loaded.config.latent_dim
 
 

@@ -84,6 +84,33 @@ value silently misses structure. `0` is valid and means decoder-only adaptation.
 Afterwards, read `novel_variance_share_per_dim` and the novel dimensions'
 stability, a dimension contributing almost nothing is surplus.
 
+## Hyperparameters are not inherited
+
+`latent_dim` is the only setting taken from the reference, derived as the prior's
+dimensions plus `n_additional_dims`. Everything else comes from
+{class}`~structboost.BAEConfig` defaults unless you pass `config=` yourself, so a
+reference tuned to `boosting_stepno=50, max_iterations=200` transfers at `50` and
+`1000`, and a reference fitted with `seed=42` transfers unseeded.
+
+```python
+# Inherits nothing but latent_dim, and says so.
+model = BAE.from_reference(reference_model, target, n_additional_dims=5)
+
+# Carries the settings over.
+model = BAE.from_reference(
+    reference_model,
+    target,
+    n_additional_dims=5,
+    config=BAEConfig(latent_dim=15, boosting_stepno=50, max_iterations=200, seed=42),
+)
+```
+
+The first form warns and names the fields that differed. It warns only for a
+model reference, because a Parquet or CSV prior carries no configuration to
+compare against, which is also why the settings are not inherited automatically:
+the same prior would otherwise behave differently depending on whether you passed
+the model or its exported weights.
+
 ## `decoder_warmup_epochs`
 
 Trains the decoder against the frozen prior programs *before* boosting starts.
