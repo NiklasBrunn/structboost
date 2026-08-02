@@ -354,8 +354,19 @@ def allboost(
 
     References
     ----------
+    Binder, H. & Schumacher, M. (2009). Incorporating pathway information into
+    boosting estimation of high-dimensional risk prediction models.
+    *BMC Bioinformatics* 10, 18. (Source of the algorithm: componentwise L2
+    boosting with the ``nu``/``csf`` penalty-adaptation mechanism.)
+
+    Binder, H. & Schumacher, M. (2008). Allowing for mandatory covariates in
+    boosting estimation of sparse high-dimensional survival models.
+    *BMC Bioinformatics* 9, 14. (Mandatory-covariate pre-step used by
+    ``mandatory_features``.)
+
     Hofner, B., Hothorn, T., Kneib, T. & Schmid, M. (2011). A Framework for
-    Unbiased Model Selection Based on Boosting. *JCGS* 20(4).
+    Unbiased Model Selection Based on Boosting. *JCGS* 20(4). (Penalized
+    variance-reduction selection criterion.)
 
     Bühlmann, P. & Hothorn, T. (2007). Boosting Algorithms: Regularization,
     Prediction and Model Fitting. *Statistical Science* 22(4), 477-505.
