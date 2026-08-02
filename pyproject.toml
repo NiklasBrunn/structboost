@@ -96,6 +96,10 @@ extend-exclude = [
   "docs/_build",
   # Kept out of the package repo, but present in working checkouts.
   "benchmarks",
+  # Ruff 0.16 formats code blocks inside Markdown. The guide aligns trailing
+  # comments across a block so the annotations read as a column, and the
+  # formatter collapses that to a single space. Prose is not linted here.
+  "*.md",
 ]
 
 [tool.ruff.lint]
