@@ -78,6 +78,9 @@ packages = ["src/structboost"]
 include = [
   "src/structboost",
   "tests",
+  # Carries the interpreter-version guard, so a packager running the suite on a
+  # too-old Python gets the reason rather than a TypeError from a runtime union.
+  "conftest.py",
   "README.md",
   "CHANGELOG.md",
   "CONTRIBUTING.md",

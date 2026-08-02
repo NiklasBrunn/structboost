@@ -75,15 +75,20 @@ warning**, never a silent relocation.
 `ValueError` on load, "Upgrade structboost"
 : Written by a newer checkpoint format than this install understands.
 
+`ValueError` on load, "predates the first public release"
+: Written by a pre-release build. Refit the model. No migration exists because
+  those formats were never published.
+
 ## Checkpoint format versions
 
 The format carries an integer version, bumped when the payload changes in a way
 older installs would misread.
 
-This release writes format 2. A reader refuses any format newer than it
-understands rather than guessing, which matters because ignoring an unknown key
-can mean silently reading the wrong matrix, a wrong answer rather than a missing
-one.
+This release writes format 4, and reads only format 4. A reader refuses any
+format newer than it understands rather than guessing, which matters because
+ignoring an unknown key can mean silently reading the wrong matrix, a wrong
+answer rather than a missing one. Formats 1 to 3 all predate the first public
+release, so they are refused by name instead of being migrated.
 
 ## Just the gene programs
 
