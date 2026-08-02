@@ -70,11 +70,23 @@ jobs:
           path: docs/_build/html
 
   # Publishes to https://niklasbrunn.github.io/structboost on pushes to main.
-  # Requires Pages to be enabled for the repository with "GitHub Actions" as the
-  # source; until then this job is skipped and the build above still gates.
+  #
+  # Gated on the `PAGES_ENABLED` repository variable, which has to be set by hand
+  # (Settings -> Secrets and variables -> Actions -> Variables) at the same time
+  # Pages is turned on with "GitHub Actions" as the source. There is no context
+  # that reports whether Pages is enabled, so without the variable this job runs
+  # unconditionally on every push to main and `deploy-pages` fails with a 404
+  # from the Pages API. `continue-on-error` would hide that, but it would also
+  # hide a genuine deployment failure once Pages is live.
+  #
+  # The `docs` job above still builds with `-W` on every push, so documentation
+  # stays gated whether or not this job runs.
   deploy-docs:
     needs: docs
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: >-
+      github.ref == 'refs/heads/main'
+      && github.event_name == 'push'
+      && vars.PAGES_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       pages: write
