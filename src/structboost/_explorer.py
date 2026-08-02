@@ -167,7 +167,11 @@ def _build_explorer_payload(
     if layers is not None:
         layer_names = list(layers)
     else:
-        layer_names = ["X"] + list(adata.layers.keys())
+        # anndata >= 0.13 exposes ``.X`` as ``layers[None]``, so the mapping's
+        # keys include ``None``. Taking them verbatim would emit ``.X`` twice,
+        # once as "X" and again under a ``None`` key that `json.dumps` writes as
+        # "null" -- a duplicated matrix rather than a crash.
+        layer_names = ["X"] + [name for name in adata.layers if name is not None]
 
     expression: dict[str, dict[str, list[float]]] = {}
     for layer_name in layer_names:

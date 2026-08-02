@@ -153,8 +153,11 @@ def test_build_payload_multi_layer():
         annotations_key=None,
     )
 
-    assert "X" in payload["expression"]
-    assert "counts" in payload["expression"]
+    # Exact key set, not membership: anndata >= 0.13 exposes `.X` as
+    # `layers[None]`, so taking the mapping's keys verbatim adds a `None` entry
+    # holding a second copy of `.X`. Membership assertions pass right through it.
+    assert set(payload["expression"]) == {"X", "counts"}
+    assert None not in payload["expression"]
 
 
 def test_build_payload_sparse_layer():

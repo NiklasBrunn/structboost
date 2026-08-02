@@ -307,7 +307,12 @@ def _expression_matrix(adata: AnnData, layer: str | None):
     if layer is None:
         return adata.X
     if layer not in adata.layers:
-        raise KeyError(f"adata has no layer {layer!r}; available layers: {sorted(adata.layers)}")
+        # anndata >= 0.13 exposes ``.X`` as ``layers[None]``, so iterating the
+        # mapping yields a ``None`` key alongside the real names. Sorting that
+        # mixed list raises TypeError and buries this KeyError, turning a clear
+        # "no such layer" message into a comparison error from the error path.
+        available = sorted(name for name in adata.layers if name is not None)
+        raise KeyError(f"adata has no layer {layer!r}; available layers: {available}")
     return adata.layers[layer]
 
 
