@@ -48,9 +48,14 @@ MAGIC = "structboost.bae"
 #: ``batch_integration_mode`` API. Formats 1 and 2 predate the first public
 #: release, so no migration is written and the loader refuses them by name
 #: rather than failing on a missing key.
-CHECKPOINT_FORMAT = 3
+#:
+#: 4 — ``BAEConfig.boosting_mode`` was dropped with ``allboost``'s refine mode.
+#: ``restore_payload`` splats the stored config into ``BAEConfig``, so a format-3
+#: file would otherwise die on an unexpected keyword argument. Every format below
+#: this one predates the first public release.
+CHECKPOINT_FORMAT = 4
 #: Oldest format this install can read.
-MIN_CHECKPOINT_FORMAT = 3
+MIN_CHECKPOINT_FORMAT = 4
 
 #: Category element types that survive the round trip with their comparison
 #: semantics intact. ``bool`` precedes ``int`` because ``bool`` is a subclass of

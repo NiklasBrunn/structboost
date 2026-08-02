@@ -162,7 +162,6 @@ def allboost(
     stepno: int = 20,
     nu: float = 0.1,
     csf: float = 0.9,
-    mode: str = "standard",
     independent: bool = True,
     return_history: Literal[False] = False,
     return_covcache: Literal[False] = False,
@@ -181,7 +180,6 @@ def allboost(
     stepno: int = 20,
     nu: float = 0.1,
     csf: float = 0.9,
-    mode: str = "standard",
     independent: bool = True,
     return_history: Literal[True],
     return_covcache: Literal[False] = False,
@@ -200,7 +198,6 @@ def allboost(
     stepno: int = 20,
     nu: float = 0.1,
     csf: float = 0.9,
-    mode: str = "standard",
     independent: bool = True,
     return_history: Literal[False] = False,
     return_covcache: Literal[True] = ...,
@@ -219,7 +216,6 @@ def allboost(
     stepno: int = 20,
     nu: float = 0.1,
     csf: float = 0.9,
-    mode: str = "standard",
     independent: bool = True,
     return_history: Literal[True],
     return_covcache: Literal[True],
@@ -237,7 +233,6 @@ def allboost(
     stepno: int = 20,
     nu: float = 0.1,
     csf: float = 0.9,
-    mode: str = "standard",
     independent: bool = True,
     return_history: bool = False,
     return_covcache: bool = False,
@@ -299,15 +294,11 @@ def allboost(
     stepno : int, default=20
         Number of boosting iterations per target.
     nu : float, default=0.1
-        Learning rate. In "standard" mode, adapts per feature via csf.
-        In "refine" mode, stays constant for all features.
+        Learning rate. Adapts per feature via csf after each selection.
     csf : float, default=0.9
-        Cumulative shrinkage factor (only used in "standard" mode).
+        Cumulative shrinkage factor.
         After selection: nuvec[j] = 1 - (1 - nuvec[j])^csf.
         csf < 1 promotes diversity, csf > 1 reinforces selected features.
-    mode : str, default="standard"
-        - "standard": Update winner only, with adaptive penalties (nu, csf)
-        - "refine": Update ALL selected features each step, constant nu
     independent : bool, default=True
         If True, reset learning rate and penalty vectors for each target (no
         cross-target effects). Recommended for marker gene discovery.
@@ -377,8 +368,6 @@ def allboost(
         # all-zero betamat -- including zero coefficients for mandatory features,
         # which look like a fitted model that selected nothing.
         raise ValueError(f"stepno must be >= 1, got {stepno}")
-    if mode not in ("standard", "refine"):
-        raise ValueError(f"mode must be 'standard' or 'refine', got '{mode}'")
 
     n, p = sourcemat.shape
     k = targetmat.shape[1]
@@ -487,19 +476,6 @@ def allboost(
             actualnom, _ = _calc_unibeta(sourcemat, curtarget - sourcemat @ beta, col_norms_sq)
         mand_idx = mandatory_per_target[t_idx]
 
-        if mode == "refine":
-            # Features carrying a non-zero offset coefficient are already active,
-            # so they belong in the refine set from the start. Leaving the set
-            # empty would pin them at their initial value while only newly
-            # selected features were refined. Mandatory features are excluded:
-            # the pre-step already updates them every step, and including them
-            # here would apply a second update on top of it.
-            selected_features = (
-                []
-                if beta_init is None
-                else np.setdiff1d(np.flatnonzero(beta_init[t_idx]), mand_idx).tolist()
-            )
-
         for step in range(stepno):
             if mand_idx.size > 0:
                 actualnom, beta = _mandatory_prestep(
@@ -548,29 +524,15 @@ def allboost(
             if selection_hist is not None:
                 selection_hist[t_idx, step] = actualsel
 
-            if mode == "refine":
-                # Add new feature to active set
-                if actualsel not in selected_features and actualsel not in mand_idx:
-                    selected_features.append(actualsel)
-
-                # Update ALL selected features (boosting on active set)
-                for j in selected_features:
-                    actualupdate = nuvec[j] * actualnom[j]
-                    beta[j] += actualupdate
-                    # Update actualnom using the cached covariance column.
-                    cov_col = get_covariance_column(j)
-                    actualnom -= actualupdate * cov_col / col_norms_sq
-                # No nuvec/penvec updates: selection uses constant initial penalty
-
-            else:  # standard
-                actualupdate = nuvec[actualsel] * actualnom[actualsel]
-                beta[actualsel] += actualupdate
-                # Update actualnom using the cached covariance column.
-                cov_col = get_covariance_column(actualsel)
-                actualnom -= actualupdate * cov_col / col_norms_sq
-                # Update adaptive parameters
-                nuvec[actualsel] = 1.0 - (1.0 - nuvec[actualsel]) ** csf
-                penvec[actualsel] = col_norms_sq[actualsel] * (1.0 / nuvec[actualsel] - 1.0)
+            # Update the winner only. `actualnom` is refreshed through the cached
+            # covariance column rather than by recomputing the residual.
+            actualupdate = nuvec[actualsel] * actualnom[actualsel]
+            beta[actualsel] += actualupdate
+            cov_col = get_covariance_column(actualsel)
+            actualnom -= actualupdate * cov_col / col_norms_sq
+            # Update adaptive parameters
+            nuvec[actualsel] = 1.0 - (1.0 - nuvec[actualsel]) ** csf
+            penvec[actualsel] = col_norms_sq[actualsel] * (1.0 / nuvec[actualsel] - 1.0)
 
             if beta_path is not None:
                 beta_path[t_idx, step, :] = beta

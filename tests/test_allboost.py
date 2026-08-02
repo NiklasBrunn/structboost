@@ -154,13 +154,6 @@ class TestCovarianceCache:
         # Allow tiny floating-point differences from lazy vs. pre-computed cache
         np.testing.assert_allclose(beta_with_cache, beta_without_cache, rtol=1e-14)
 
-    def test_allboost_with_covcache_refine_mode(self, synthetic_data):
-        x, y = synthetic_data
-        cov = compute_covariance_cache(x)
-        beta_with_cache = allboost(x, y, covcache=cov, stepno=10, mode="refine")
-        beta_without_cache = allboost(x, y, stepno=10, mode="refine")
-        np.testing.assert_allclose(beta_with_cache, beta_without_cache, rtol=1e-14)
-
     def test_lazy_cache_stores_only_requested_columns(self, synthetic_data):
         x, y = synthetic_data
         stepno = 3
@@ -382,26 +375,6 @@ class TestAllboostMandatory:
         for j in mand:
             assert np.all(beta[:, j] != 0)
 
-    def test_mandatory_refine_mode(self, synthetic_data):
-        """Mandatory features work in refine mode."""
-        x, y = synthetic_data
-        mand = np.array([0, 3], dtype=np.intp)
-        beta = allboost(x, y, stepno=10, mandatory_features=mand, mode="refine")
-        assert beta.shape == (y.shape[1], x.shape[1])
-        assert np.all(np.isfinite(beta))
-        for j in mand:
-            assert np.all(beta[:, j] != 0)
-
-    def test_mandatory_refine_excluded_from_selected_features(self, synthetic_data):
-        """Mandatory features must not appear in refine mode selected_features list."""
-        x, y = synthetic_data
-        mand = np.array([0, 1], dtype=np.intp)
-        _, hist = allboost(
-            x, y, stepno=10, mandatory_features=mand, mode="refine", return_history=True
-        )
-        for j in mand:
-            assert not np.any(hist.selection == j)
-
 
 class TestAllboostBackwardCompat:
     """Verify mandatory_features=None is bit-identical to old behavior."""
@@ -410,12 +383,6 @@ class TestAllboostBackwardCompat:
         x, y = synthetic_data
         beta_old = allboost(x, y, stepno=20, nu=0.1, csf=0.9)
         beta_new = allboost(x, y, stepno=20, nu=0.1, csf=0.9, mandatory_features=None)
-        np.testing.assert_array_equal(beta_old, beta_new)
-
-    def test_refine_mode_unchanged(self, synthetic_data):
-        x, y = synthetic_data
-        beta_old = allboost(x, y, stepno=20, mode="refine")
-        beta_new = allboost(x, y, stepno=20, mode="refine", mandatory_features=None)
         np.testing.assert_array_equal(beta_old, beta_new)
 
     def test_independent_false_unchanged(self, synthetic_data):

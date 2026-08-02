@@ -37,7 +37,6 @@ one-to-one:
 | `boosting_stepno` | `stepno` |
 | `boosting_nu` | `nu` |
 | `boosting_csf` | `csf` |
-| `boosting_mode` | `mode` |
 | `boosting_independent` | `independent` |
 | `mandatory_genes` | `mandatory_features` |
 | `prior_mode="anchored"` | `beta_init` |
@@ -67,10 +66,6 @@ already-selected features. Adapting per-feature penalties across boosting steps
 is the mechanism Binder & Schumacher [^binder2009] use to fold external biological
 knowledge into the fit: pathway membership in their case, mandatory markers or
 a chosen `csf` here.
-
-`mode="refine"` updates **all** selected features each step rather than just the
-winner, and typically needs a much smaller `nu` (0.01 or 0.001 against 0.1). In
-refine mode `csf` is ignored.
 
 ## Forcing features in
 

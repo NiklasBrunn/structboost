@@ -76,8 +76,6 @@ class BAEConfig:
         Boosting learning rate.
     boosting_csf
         Cumulative shrinkage factor for boosting.
-    boosting_mode
-        Boosting mode: "standard" or "refine".
     boosting_independent
         If True, reset boosting state for each latent dimension (recommended).
     nuisance_ridge
@@ -213,7 +211,6 @@ class BAEConfig:
     boosting_stepno: int = 50
     boosting_nu: float = 0.1
     boosting_csf: float = 0.9
-    boosting_mode: Literal["standard", "refine"] = "standard"
     boosting_independent: bool = True
     boosting_precompute_covcache: bool = False
     nuisance_ridge: float = 0.0

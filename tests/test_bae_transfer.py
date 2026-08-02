@@ -93,18 +93,6 @@ def test_beta_init_drift_depends_on_stepno_not_on_repetition():
     assert np.array_equal(first, again)
 
 
-def test_refine_mode_updates_the_offset_support():
-    """Refine must treat offset-carrying features as active, not pin them."""
-    rng = np.random.default_rng(3)
-    X = rng.normal(size=(150, 25))
-    Y = X[:, :3] @ rng.normal(size=(3, 2)) + 0.2 * rng.normal(size=(150, 2))
-    anchor = np.zeros((2, 25))
-    anchor[:, :3] = 0.4
-
-    fitted = allboost(X, Y, stepno=15, mode="refine", beta_init=anchor)
-    assert np.abs(fitted[:, :3] - anchor[:, :3]).max() > 1e-8
-
-
 def test_beta_init_shape_is_validated():
     rng = np.random.default_rng(4)
     X = rng.normal(size=(50, 10))

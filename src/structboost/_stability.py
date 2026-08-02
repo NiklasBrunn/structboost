@@ -254,7 +254,6 @@ def stability_selection(
     stepno: int = 20,
     nu: float = 0.1,
     csf: float = 0.9,
-    mode: str = "standard",
     independent: bool = True,
     seed: int | None = None,
     verbose: bool = False,
@@ -289,7 +288,7 @@ def stability_selection(
         Stability threshold ``pi`` in ``(0.5, 1]``. Genes selected in at least this
         fraction of subsamples form the stable support. Must exceed ``0.5`` for the
         error bound to be defined.
-    stepno, nu, csf, mode, independent
+    stepno, nu, csf, independent
         Boosting hyperparameters, forwarded to :func:`allboost`. Use the same
         values the encoder was fitted with.
     seed
@@ -360,7 +359,6 @@ def stability_selection(
             stepno=stepno,
             nu=nu,
             csf=csf,
-            mode=mode,
             independent=independent,
         )
         beta_genes = betamat[:, :p_genes].T  # (n_genes, latent_dim)
