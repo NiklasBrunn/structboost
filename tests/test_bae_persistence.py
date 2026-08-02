@@ -182,7 +182,9 @@ def test_transfer_state_round_trips_and_loaded_model_can_be_a_reference(tmp_path
 
     reference, _ = _fit()
     target = _adata(seed=3)
-    transferred = BAE.from_reference(reference, target, n_additional_dims=2)
+    transferred = BAE.from_reference(
+        reference, target, n_additional_dims=2, config=_config(latent_dim=5)
+    )
     transferred.fit(target, verbose=False)
     latent = transferred.transform(target)
 

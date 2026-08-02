@@ -213,7 +213,9 @@ def test_frozen_mode_leaves_the_prior_bitwise_unchanged():
 
     ref, adata = _reference()
     work = adata.copy()
-    model = BAE.from_reference(ref, work, n_additional_dims=2, prior_mode="frozen")
+    model = BAE.from_reference(
+        ref, work, n_additional_dims=2, prior_mode="frozen", config=_transfer_config(2)
+    )
     prior = model.prior_weights.copy()
     model.fit(work, verbose=False, decoder_warmup_epochs=3)
 
@@ -247,7 +249,9 @@ def test_frozen_guarantee_holds_for_a_float64_prior(tmp_path):
         weights, tmp_path / "p.parquet", gene_symbols=list(adata.var_names)
     )
     work = adata.copy()
-    model = BAE.from_reference(path, work, n_additional_dims=2, prior_mode="frozen")
+    model = BAE.from_reference(
+        path, work, n_additional_dims=2, prior_mode="frozen", config=_config(latent_dim=5)
+    )
     model.fit(work, verbose=False, decoder_warmup_epochs=3)
 
     assert work.uns["bae_transfer"]["prior_weights_unchanged"] is True
@@ -291,7 +295,7 @@ def test_zero_additional_dims_adapts_only_the_decoder():
 
     ref, adata = _reference()
     work = adata.copy()
-    model = BAE.from_reference(ref, work, n_additional_dims=0)
+    model = BAE.from_reference(ref, work, n_additional_dims=0, config=_transfer_config(0))
     model.fit(work, verbose=False, decoder_warmup_epochs=3)
 
     assert model.config.latent_dim == 4
@@ -432,7 +436,7 @@ def test_batch_nuisance_applies_to_the_novel_dimensions():
     ref.fit(adata.copy(), verbose=False, batch_key="batch")
 
     work = adata.copy()
-    model = BAE.from_reference(ref, work, n_additional_dims=2)
+    model = BAE.from_reference(ref, work, n_additional_dims=2, config=_transfer_config(2))
     model.fit(
         work,
         verbose=False,
@@ -462,7 +466,18 @@ def test_frozen_prior_reports_no_stability_rather_than_certainty():
 
     ref, adata = _reference()
     work = adata.copy()
-    model = BAE.from_reference(ref, work, n_additional_dims=2, prior_mode="frozen")
+    # A wider support than the module default: iteration-mode stability matches
+    # dimensions across runs by cosine similarity, and with only two free
+    # dimensions and `boosting_stepno=10` there is too little support to match on
+    # (quality ~0.44, below the 0.5 warning threshold). This is governed by
+    # `boosting_stepno`, not by the iteration count.
+    model = BAE.from_reference(
+        ref,
+        work,
+        n_additional_dims=2,
+        prior_mode="frozen",
+        config=_transfer_config(2, boosting_stepno=30),
+    )
     model.fit(work, verbose=False, decoder_warmup_epochs=3)
 
     result = model.stability_selection(work, mode="iteration", n_runs=8, threshold=0.7)
@@ -476,7 +491,9 @@ def test_anchored_prior_reports_movement_off_the_anchor():
 
     ref, adata = _reference()
     work = adata.copy()
-    model = BAE.from_reference(ref, work, n_additional_dims=2, prior_mode="anchored")
+    model = BAE.from_reference(
+        ref, work, n_additional_dims=2, prior_mode="anchored", config=_transfer_config(2)
+    )
     model.fit(work, verbose=False, decoder_warmup_epochs=3)
 
     result = model.stability_selection(work, mode="iteration", n_runs=8, threshold=0.7)
@@ -489,7 +506,7 @@ def test_stability_selection_leaves_a_transfer_model_unchanged():
 
     ref, adata = _reference()
     work = adata.copy()
-    model = BAE.from_reference(ref, work, n_additional_dims=2)
+    model = BAE.from_reference(ref, work, n_additional_dims=2, config=_transfer_config(2))
     model.fit(work, verbose=False, decoder_warmup_epochs=3)
 
     before = model.get_encoder_weights().copy()
@@ -509,7 +526,7 @@ def test_transfer_diagnostics_split_prior_and_novel_support():
 
     ref, adata = _reference()
     work = adata.copy()
-    model = BAE.from_reference(ref, work, n_additional_dims=2)
+    model = BAE.from_reference(ref, work, n_additional_dims=2, config=_transfer_config(2))
     model.fit(work, verbose=False, decoder_warmup_epochs=3)
 
     info = work.uns["bae_transfer"]
@@ -527,7 +544,7 @@ def test_block_accessors_split_prior_and_novel():
 
     ref, adata = _reference()
     work = adata.copy()
-    model = BAE.from_reference(ref, work, n_additional_dims=3)
+    model = BAE.from_reference(ref, work, n_additional_dims=3, config=_transfer_config(3))
     model.fit(work, verbose=False, decoder_warmup_epochs=3)
 
     W = model.get_encoder_weights()
@@ -558,7 +575,7 @@ def test_per_dimension_variance_shares_are_reported():
 
     ref, adata = _reference()
     work = adata.copy()
-    model = BAE.from_reference(ref, work, n_additional_dims=3)
+    model = BAE.from_reference(ref, work, n_additional_dims=3, config=_transfer_config(3))
     model.fit(work, verbose=False, decoder_warmup_epochs=3)
 
     info = work.uns["bae_transfer"]
@@ -722,11 +739,13 @@ def test_a_transferred_model_is_itself_a_valid_prior():
 
     ref, adata = _reference()
     work = adata.copy()
-    first = BAE.from_reference(ref, work, n_additional_dims=2)
+    first = BAE.from_reference(ref, work, n_additional_dims=2, config=_transfer_config(2))
     first.fit(work, verbose=False, decoder_warmup_epochs=3)
 
     second_data = adata.copy()
-    second = BAE.from_reference(work, second_data, n_additional_dims=1)
+    second = BAE.from_reference(
+        work, second_data, n_additional_dims=1, config=_config(latent_dim=7)
+    )
     assert second.config.latent_dim == 6 + 1
     second.fit(second_data, verbose=False, decoder_warmup_epochs=2)
     assert second_data.uns["bae_transfer"]["prior_weights_unchanged"] is True
@@ -811,7 +830,7 @@ def test_prior_can_be_loaded_from_a_file(tmp_path):
     )
 
     work = adata.copy()
-    model = BAE.from_reference(path, work, n_additional_dims=2)
+    model = BAE.from_reference(path, work, n_additional_dims=2, config=_transfer_config(2))
     assert np.allclose(model.prior_weights, ref.get_encoder_weights())
     model.fit(work, verbose=False, decoder_warmup_epochs=3)
     assert work.uns["bae_transfer"]["prior_weights_unchanged"] is True
