@@ -100,3 +100,60 @@ jobs:
           path: dist/
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  # Publishes the tag on the repository's Releases page, with the matching
+  # CHANGELOG section as the body and the built artifacts attached. Without
+  # this, tags exist but Releases does not list them, so the repository shows no
+  # version history and "Watch -> Releases" notifies nobody.
+  #
+  # `gh` is preinstalled on the runner and authenticates with the built-in
+  # token, so this adds no third-party action to the release path and needs no
+  # `id-token` permission -- only `contents: write` to create the release.
+  #
+  # The result checks rather than a plain `needs:` are deliberate. A Release
+  # must not announce a version whose upload failed, but `publish-pypi` is
+  # *skipped* for a pre-release tag, and a skipped dependency would skip this
+  # job too. `always()` re-enables it so the two outcomes can be told apart.
+  github-release:
+    needs: [build, publish-pypi]
+    if: >-
+      always()
+      && needs.build.result == 'success'
+      && (needs.publish-pypi.result == 'success' || needs.publish-pypi.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IS_PRERELEASE: ${{ needs.build.outputs.is-prerelease }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          # The CHANGELOG section for this version: everything between its
+          # heading and the next one. A pre-release usually has no section of
+          # its own, so fall back to generated notes rather than an empty body.
+          awk -v v="$version" '
+            $0 ~ "^### \\["v"\\]" { found = 1; next }
+            found && /^### \[/    { exit }
+            found                 { print }
+          ' CHANGELOG.md > notes.md
+          flags=()
+          if [ -s notes.md ]; then
+            flags+=(--notes-file notes.md)
+            echo "Using the CHANGELOG section for $version"
+          else
+            flags+=(--generate-notes)
+            echo "::warning::No CHANGELOG section for $version; using generated notes"
+          fi
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.whl \
+            --title "structboost $version" "${flags[@]}"
