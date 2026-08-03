@@ -3,6 +3,28 @@
 Releases follow [semantic versioning](https://semver.org). While the project is
 pre-1.0, a minor bump may break API.
 
+### [0.1.1] - 2026-08-03
+
+A metadata release. No code in `structboost` changed; every difference is in
+what the package says about itself.
+
+The PyPI page is the reason for it. A project's long description is baked into
+the uploaded artifacts and is immutable per release, so 0.1.0 shipped with a
+README announcing "Not on PyPI yet" and directing readers to a pinned TestPyPI
+install. Correcting the file in git does not touch the published page — only a
+new release does. A `0.1.0.post1` would have expressed "packaging only" more
+precisely, but post-releases are handled inconsistently by downstream tooling
+and the versioning policy here is plain `MAJOR.MINOR.PATCH`.
+
+Python 3.13 is tested and advertised. `requires-python = ">=3.10"` never had an
+upper bound, so pip already installed on 3.13 while the CI matrix stopped at
+3.12 — support permitted but never exercised. The matrix now covers it, and the
+classifier list says what the requirement already allowed. 3.14 is left out
+until the `[bae]` extra's wheels are dependably available there.
+
+`CITATION.cff` gains `version` and `date-released`, which a citation file for a
+released version cannot do without, plus a `url` for the documentation site.
+
 ### [0.1.0] - 2026-07-31
 
 First public release.
