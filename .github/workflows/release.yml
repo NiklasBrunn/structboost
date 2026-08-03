@@ -74,6 +74,14 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
+          # TestPyPI carries this name from a private pre-public version scheme,
+          # up to 0.1.11.0. Every release number below that is already taken, so
+          # the upload is refused with "400 File already exists" -- as it was for
+          # v0.1.1, which existed there from 2026-01-27. That failure says
+          # nothing about the build and must not redden a release whose PyPI
+          # upload succeeded, so a collision here is tolerated. It stays fatal on
+          # PyPI, where a duplicate would mean something has genuinely gone wrong.
+          skip-existing: true
 
   # Final releases only. Inert until a "pending publisher" for this repository
   # and workflow is configured on pypi.org and a `pypi` environment exists here,
