@@ -74,22 +74,19 @@ jobs:
 
   # Publishes to https://niklasbrunn.github.io/structboost on pushes to main.
   #
-  # Gated on the `PAGES_ENABLED` repository variable, which has to be set by hand
-  # (Settings -> Secrets and variables -> Actions -> Variables) at the same time
-  # Pages is turned on with "GitHub Actions" as the source. There is no context
-  # that reports whether Pages is enabled, so without the variable this job runs
-  # unconditionally on every push to main and `deploy-pages` fails with a 404
-  # from the Pages API. `continue-on-error` would hide that, but it would also
-  # hide a genuine deployment failure once Pages is live.
+  # This was additionally gated on a `PAGES_ENABLED` repository variable while
+  # Pages was off. Nothing in the workflow context reports whether Pages is
+  # enabled, so an ungated job would have failed every push to main with a 404
+  # from the Pages API. Pages is enabled now, and the variable had become a
+  # second switch to keep in sync with the first for no benefit -- if Pages is
+  # ever turned off, this job failing is the correct signal rather than one to
+  # suppress in advance.
   #
-  # The `docs` job above still builds with `-W` on every push, so documentation
-  # stays gated whether or not this job runs.
+  # The `docs` job above builds with `-W` on every push regardless, so a
+  # documentation regression fails CI whether or not this job runs.
   deploy-docs:
     needs: docs
-    if: >-
-      github.ref == 'refs/heads/main'
-      && github.event_name == 'push'
-      && vars.PAGES_ENABLED == 'true'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       pages: write
