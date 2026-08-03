@@ -55,11 +55,13 @@ pip install structboost                 # allboost only, NumPy-only
 | `plot` | matplotlib | the `plot_*` functions |
 | `io` | pyarrow | Parquet encoder-weight files |
 
-Not on PyPI yet. Until it is, install from source or from TestPyPI:
+Not on PyPI yet. Until it is, install from source or from TestPyPI. Pin the
+version: TestPyPI also carries older pre-release builds under this name, and an
+unpinned install resolves to one of those rather than to the current code.
 
 ```bash
 pip install --index-url https://test.pypi.org/simple/ \
-            --extra-index-url https://pypi.org/simple/ "structboost[bae]"
+            --extra-index-url https://pypi.org/simple/ "structboost[bae]==0.1.0"
 ```
 
 See [Installation](https://niklasbrunn.github.io/structboost/installation.html)
