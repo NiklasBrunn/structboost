@@ -3011,8 +3011,9 @@ class BAE(nn.Module):
         Use :meth:`transfer_diagnostics` on **held-out cells** to make it
         interpretable; that requires only the model and your own data. Where the
         reference dataset is also available, a transfer onto held-out *reference*
-        cells gives a second, stricter null (see
-        ``paper_analysis/a9_transfer_null.py``).
+        cells gives a second, stricter null: the prior programs were fitted on
+        that population, so whatever share the novel dimensions still claim there
+        is capacity fitting noise rather than structure the prior missed.
 
         ``novel_variance_share_per_dim`` is the same quantity computed by dropping
         one novel dimension at a time. The entries do not sum to the aggregate:

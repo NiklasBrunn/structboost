@@ -338,10 +338,10 @@ def allboost(
     whatever its column norm, and the criterion reduces to
     ``nu * (x_j' r)^2 / ||x_j||^2``. Penalty adaptation (``csf``) then moves
     features off that common footing deliberately, which is the diversity
-    mechanism rather than a selection bias. Prior to v0.1.21.0 selection used the squared shrunken
-    coefficient ``(x_j' r / (||x_j||^2 + penvec_j))^2``, which favors low-norm
-    features and matches the score criterion only for equal column norms
-    (standardized predictors). The coefficient *update* is unchanged.
+    mechanism rather than a selection bias. An earlier formulation selected on
+    the squared shrunken coefficient ``(x_j' r / (||x_j||^2 + penvec_j))^2``,
+    which favors low-norm features and matches the score criterion only for equal
+    column norms (standardized predictors). The coefficient *update* is unchanged.
 
     References
     ----------
@@ -508,7 +508,7 @@ def allboost(
             # scale-invariant in the predictor columns and yields unbiased feature
             # selection (Hofner et al. 2011).
             #
-            # Previously (<= v0.1.20.0) selection used the *squared shrunken
+            # An earlier formulation selected on the *squared shrunken
             # coefficient*:
             #   criterion_j = (beta_j * ||x_j||^2 / (||x_j||^2 + penvec_j))^2
             #               = ((x_j' r) / (||x_j||^2 + penvec_j))^2,

@@ -44,14 +44,17 @@ def compute_covariance_cache(
     Examples
     --------
     >>> import numpy as np
-    >>> from structboost import compute_covariance_cache, allboost
+    >>> from structboost import allboost, compute_covariance_cache
     >>> rng = np.random.default_rng(42)
     >>> X = rng.standard_normal((100, 50))
     >>> X = (X - X.mean(axis=0)) / X.std(axis=0)
     >>> covcache = compute_covariance_cache(X)
-    >>> # Use the same covcache for multiple allboost calls
-    >>> beta1 = allboost(X, y1, covcache=covcache)
-    >>> beta2 = allboost(X, y2, covcache=covcache)
+    >>> # Reuse one cache across calls. Targets are (n_samples, n_targets).
+    >>> targets = rng.standard_normal((100, 3))
+    >>> beta1 = allboost(X, targets, covcache=covcache)
+    >>> beta2 = allboost(X, targets[:, :2], covcache=covcache)
+    >>> beta1.shape
+    (3, 50)
     """
     p = sourcemat.shape[1]
 
