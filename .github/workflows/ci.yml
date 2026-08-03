@@ -19,8 +19,11 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      # `[dev]` alone: this job runs ruff and nothing else. `[test]` now pulls
+      # the runtime extra (see pyproject), so asking for it here would download
+      # torch to lint the source.
       - name: Install
-        run: uv pip install --system -e ".[dev,test]"
+        run: uv pip install --system -e ".[dev]"
       - name: Ruff
         run: |
           ruff check .
