@@ -45,8 +45,15 @@ io = [
   "pandas>=1.5",
   "pyarrow>=12",
 ]
+# Pulls the runtime extra deliberately. The suite is overwhelmingly BAE tests,
+# and they `importorskip` past a missing torch/anndata rather than failing: 360
+# of 411 test functions live behind such a guard. With pytest alone the sdist's
+# own use case -- a downstream packager (conda-forge, Debian) building and
+# running the tests -- would exercise ~51 of them and still report success.
+# Requiring the dependency here makes a green build mean the suite actually ran.
 test = [
   "pytest>=7.4",
+  "structboost[bae]",
 ]
 dev = [
   "pre-commit>=3.6",
