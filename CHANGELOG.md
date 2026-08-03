@@ -3,6 +3,18 @@
 Releases follow [semantic versioning](https://semver.org). While the project is
 pre-1.0, a minor bump may break API.
 
+### [0.1.2] - 2026-08-03
+
+Project metadata gains `Documentation` and `Changelog` links. PyPI renders
+`project.urls` as the sidebar next to the project description, and it carried
+only the repository and the issue tracker — so the documentation site, where
+every substantive explanation lives, was reachable from the README body but not
+from the navigation beside it. Both targets are verified live.
+
+As with 0.1.1, nothing in the package changed: `project.urls` reaches users only
+through an upload, so correcting it in the repository has no effect until a
+release carries it.
+
 ### [0.1.1] - 2026-08-03
 
 A metadata release. No code in `structboost` changed; every difference is in

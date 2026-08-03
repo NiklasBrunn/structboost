@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "structboost"
-version = "0.1.1"
+version = "0.1.2"
 description = "Boosting Autoencoders (BAE) and componentwise L2 boosting utilities for scverse-style workflows."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -73,8 +73,10 @@ docs = [
 
 [project.urls]
 Homepage = "https://github.com/NiklasBrunn/structboost"
+Documentation = "https://niklasbrunn.github.io/structboost"
 Repository = "https://github.com/NiklasBrunn/structboost"
 Issues = "https://github.com/NiklasBrunn/structboost/issues"
+Changelog = "https://niklasbrunn.github.io/structboost/changelog.html"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/structboost"]
