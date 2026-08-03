@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "structboost"
-version = "0.1.0rc1"
+version = "0.1.0"
 description = "Boosting Autoencoders (BAE) and componentwise L2 boosting utilities for scverse-style workflows."
 readme = "README.md"
 license = { file = "LICENSE" }
