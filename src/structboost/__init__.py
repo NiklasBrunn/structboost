@@ -16,7 +16,7 @@ from ._annotation import (
     extract_gene_rankings,
     write_annotations_to_h5ad,
 )
-from ._boosting import AllboostHistory, allboost
+from ._boosting import AllboostHistory, allboost, column_norms_sq
 from ._io import looks_like_ensembl, read_encoder_weights, write_encoder_weights
 from ._simulation import SimulationResult, sim_scrnaseq_anndata, sim_scrnaseq_data
 from ._stability import StabilitySelectionResult, stability_selection
@@ -51,6 +51,7 @@ __all__ = [
     "StabilitySelectionResult",
     "TrainingReport",
     "allboost",
+    "column_norms_sq",
     "compute_covariance_cache",
     "encode_obs_covariates",
     "export_interactive_html",

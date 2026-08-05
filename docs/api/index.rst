@@ -128,6 +128,7 @@ autoencoder involved, and the routine that fits the BAE encoder. See
    :recursive:
 
    structboost.allboost
+   structboost.column_norms_sq
    structboost.AllboostHistory
    structboost.compute_covariance_cache
 

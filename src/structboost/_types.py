@@ -106,15 +106,30 @@ class BAEConfig:
         few hundred iterations, since the encoder support random-walks and two
         runs end no more similar than two unrelated ones.
     boosting_precompute_covcache
-        If True, compute the full p×p covariance matrix before training, which
-        costs 8·p² bytes (3.2 GB at p=20,000).
-        If False (default), `allboost` keeps a dict-backed column cache: a
-        covariance column is computed the first time its feature is selected and
-        reused across targets and training iterations. Memory then scales with
-        the number of *distinct selected* features (8·p bytes per column), not
-        with p², which is a large saving because boosting selects far fewer
-        features than are available. Precompute only when p is small enough that
-        the full matrix is comfortable and many features will be selected anyway.
+        Whether to compute the full p×p covariance matrix before training.
+        ``"auto"`` (default) does so whenever the 8·p² byte matrix fits a
+        conservative share of system memory; ``True`` and ``False`` are honoured
+        exactly. The resolved decision is recorded in
+        ``adata.uns["bae"]["boosting_precompute_covcache"]``.
+
+        This is a *speed* setting first and a memory setting second, which is not
+        obvious. The alternative is a dict-backed column cache: a covariance
+        column is computed the first time its feature is selected and reused
+        across targets and iterations, so memory scales with the number of
+        *distinct selected* features (8·p bytes per column) rather than with p².
+        That sounds strictly cheaper, and in memory it is — but building all p
+        columns at once is a single compute-bound matrix product running near
+        hardware peak, while fetching them one at a time is a sequence of
+        memory-bound matrix-vector products. Measured on real data, precomputing
+        wins from roughly ``p/59`` distinct selected features onwards, and a fit
+        passes that within its first iteration, where up to
+        ``boosting_stepno × latent_dim`` distinct features can enter. End-to-end
+        it measured 1.7–2.3× faster at p=3,000–10,000.
+
+        The cost is memory, and it is real: 8·p² is 32 MB at p=2,000, 800 MB at
+        p=10,000 and 3.2 GB at p=20,000, transiently doubled while the matrix is
+        built. That is what ``"auto"`` guards against; set ``False`` explicitly on
+        a memory-constrained machine.
     disentanglement
         Latent-dimension disentanglement method. ``"none"`` (default) applies no
         constraint. ``"correlation"`` adds a soft, differentiable squared-
@@ -212,7 +227,7 @@ class BAEConfig:
     boosting_nu: float = 0.1
     boosting_csf: float = 0.9
     boosting_independent: bool = True
-    boosting_precompute_covcache: bool = False
+    boosting_precompute_covcache: bool | Literal["auto"] = "auto"
     nuisance_ridge: float = 0.0
     prior_mode: Literal["frozen", "anchored"] = "frozen"
     disentanglement: Literal["none", "correlation", "leave_one_out"] = "none"
@@ -245,6 +260,11 @@ class BAEConfig:
             raise ValueError("boosting_stepno must be >= 1")
         if not np.isfinite(self.nuisance_ridge) or self.nuisance_ridge < 0:
             raise ValueError("nuisance_ridge must be finite and >= 0")
+        if self.boosting_precompute_covcache not in (True, False, "auto"):
+            raise ValueError(
+                "boosting_precompute_covcache must be True, False or 'auto', got "
+                f"{self.boosting_precompute_covcache!r}"
+            )
         if self.prior_mode not in {"frozen", "anchored"}:
             raise ValueError("prior_mode must be 'frozen' or 'anchored'")
         if not 0.0 < self.boosting_nu <= 1.0:

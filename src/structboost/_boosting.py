@@ -12,32 +12,23 @@ from numpy.typing import NDArray
 _CovarianceCache = NDArray[np.floating] | dict[int, NDArray[np.float64]]
 
 
-def _calc_unibeta(
-    x: NDArray[np.floating],
-    y: NDArray[np.floating],
-    col_norms_sq: NDArray[np.floating] | None = None,
-) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
-    """Univariate regression coefficients and column squared norms.
+def column_norms_sq(sourcemat: NDArray[np.floating]) -> NDArray[np.floating]:
+    """Squared column norms ``||x_j||^2`` of the boosting design matrix.
 
-    Parameters
-    ----------
-    x : ndarray of shape (n_samples, n_features)
-        Predictor matrix.
-    y : ndarray of shape (n_samples,)
-        Target vector.
-    col_norms_sq : ndarray of shape (n_features,), optional
-        Pre-computed squared column norms ||x_j||^2. If None, computed internally.
+    Exposed so a caller that invokes :func:`allboost` repeatedly against the
+    *same* ``sourcemat`` -- which is what :meth:`structboost.BAE.fit` does, once
+    per training iteration -- can compute this once and pass it back in. It is
+    otherwise recomputed on every call, an O(n*p) pass that also allocates a full
+    ``(n_samples, n_features)`` temporary.
 
-    Returns
-    -------
-    unibeta : ndarray of shape (n_features,)
-        Coefficients beta_j = (x_j'y) / (x_j'x_j).
-    col_norms_sq : ndarray of shape (n_features,)
-        Squared column norms ||x_j||^2 (returned for reuse).
+    Using this helper rather than open-coding the expression is what guarantees a
+    hoisted value is bit-for-bit the one ``allboost`` would have computed itself.
+
+    ``einsum`` rather than ``(sourcemat**2).sum(axis=0)``: the latter materializes
+    a full ``(n_samples, n_features)`` squared copy, 1.4 GB at 60k x 6k, purely to
+    reduce it away again.
     """
-    if col_norms_sq is None:
-        col_norms_sq = (x**2).sum(axis=0)
-    return (x.T @ y) / col_norms_sq, col_norms_sq
+    return np.einsum("ij,ij->j", sourcemat, sourcemat)
 
 
 @dataclass
@@ -106,13 +97,41 @@ def _validate_mandatory_features(
     return validated
 
 
+class _MandatoryBlock:
+    """The per-target constants of the mandatory pre-step.
+
+    ``mand_idx`` is fixed for the whole of a target's boosting run, so the
+    covariance columns of the mandatory features, the Gram submatrix among them
+    and the ridge penalty do not change between steps -- only the right-hand side
+    does. Building them once per target instead of once per *step* is what this
+    exists for: the ``column_stack`` alone costs ~270 ms per training iteration at
+    20 mandatory features and p=4000, repeated ``stepno`` times for nothing.
+    """
+
+    __slots__ = ("cov", "lhs", "penalty")
+
+    def __init__(
+        self,
+        mand_idx: NDArray[np.intp],
+        col_norms_sq: NDArray[np.floating],
+        get_covariance_column: Callable[[int], NDArray[np.floating]],
+        ridge: NDArray[np.float64],
+    ) -> None:
+        self.cov = np.column_stack([get_covariance_column(int(j)) for j in mand_idx])
+        self.penalty = ridge[mand_idx] * col_norms_sq[mand_idx]
+        # The solve's left-hand side is constant across steps too. Deliberately
+        # kept as a matrix rather than a factorization: `np.linalg.solve` is
+        # O(n_mandatory^3) and therefore free next to the block construction,
+        # while swapping in a Cholesky would change results in the last bits.
+        self.lhs = self.cov[mand_idx] + np.diag(self.penalty)
+
+
 def _mandatory_prestep(
     mand_idx: NDArray[np.intp],
     actualnom: NDArray[np.floating],
     beta: NDArray[np.floating],
     col_norms_sq: NDArray[np.floating],
-    get_covariance_column: Callable[[int], NDArray[np.floating]],
-    ridge: NDArray[np.float64],
+    block: _MandatoryBlock,
     target_index: int = 0,
 ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
     """Joint mandatory update, optionally ridge-stabilized.
@@ -123,15 +142,12 @@ def _mandatory_prestep(
     if mand_idx.size == 0:
         return actualnom, beta
 
-    mandatory_cov = np.column_stack([get_covariance_column(int(j)) for j in mand_idx])
-    c_mm = mandatory_cov[mand_idx]
-    penalty = ridge[mand_idx] * col_norms_sq[mand_idx]
     # Include the derivative of the penalty at the current coefficient. Without
     # this term, repeatedly applying a ridge pre-step would converge back to the
     # unpenalized OLS solution as boosting proceeds.
-    nom_mand = actualnom[mand_idx] * col_norms_sq[mand_idx] - penalty * beta[mand_idx]
+    nom_mand = actualnom[mand_idx] * col_norms_sq[mand_idx] - block.penalty * beta[mand_idx]
     try:
-        gamma_mand = np.linalg.solve(c_mm + np.diag(penalty), nom_mand)
+        gamma_mand = np.linalg.solve(block.lhs, nom_mand)
     except np.linalg.LinAlgError as exc:
         # Deliberately not falling back to a pseudo-inverse or auto-adding ridge:
         # either silently fits a different model than the caller specified.
@@ -145,7 +161,7 @@ def _mandatory_prestep(
             "is not applied automatically."
         ) from exc
     beta[mand_idx] += gamma_mand
-    actualnom -= (mandatory_cov @ gamma_mand) / col_norms_sq
+    actualnom -= (block.cov @ gamma_mand) / col_norms_sq
 
     return actualnom, beta
 
@@ -159,6 +175,7 @@ def allboost(
     mandatory_ridge: float | NDArray[np.floating] = 0.0,
     beta_init: NDArray[np.floating] | None = None,
     covcache: _CovarianceCache | None = None,
+    col_norms_sq: NDArray[np.floating] | None = None,
     stepno: int = 20,
     nu: float = 0.1,
     csf: float = 0.9,
@@ -177,6 +194,7 @@ def allboost(
     mandatory_ridge: float | NDArray[np.floating] = 0.0,
     beta_init: NDArray[np.floating] | None = None,
     covcache: _CovarianceCache | None = None,
+    col_norms_sq: NDArray[np.floating] | None = None,
     stepno: int = 20,
     nu: float = 0.1,
     csf: float = 0.9,
@@ -195,6 +213,7 @@ def allboost(
     mandatory_ridge: float | NDArray[np.floating] = 0.0,
     beta_init: NDArray[np.floating] | None = None,
     covcache: _CovarianceCache | None = None,
+    col_norms_sq: NDArray[np.floating] | None = None,
     stepno: int = 20,
     nu: float = 0.1,
     csf: float = 0.9,
@@ -213,6 +232,7 @@ def allboost(
     mandatory_ridge: float | NDArray[np.floating] = 0.0,
     beta_init: NDArray[np.floating] | None = None,
     covcache: _CovarianceCache | None = None,
+    col_norms_sq: NDArray[np.floating] | None = None,
     stepno: int = 20,
     nu: float = 0.1,
     csf: float = 0.9,
@@ -230,6 +250,7 @@ def allboost(
     mandatory_ridge: float | NDArray[np.floating] = 0.0,
     beta_init: NDArray[np.floating] | None = None,
     covcache: _CovarianceCache | None = None,
+    col_norms_sq: NDArray[np.floating] | None = None,
     stepno: int = 20,
     nu: float = 0.1,
     csf: float = 0.9,
@@ -291,6 +312,14 @@ def allboost(
         full-cache fast path. A dict maps feature indices to covariance columns
         and grows only when a feature is selected. If None, an empty column
         cache is created. Reuse the returned cache with the same sourcemat only.
+    col_norms_sq : ndarray of shape (n_features,), optional
+        Pre-computed squared column norms, as returned by :func:`column_norms_sq`.
+        Computed internally when None. Supplying it skips an O(n*p) pass and a
+        full ``(n_samples, n_features)`` temporary per call, which matters when
+        ``allboost`` is called repeatedly against an unchanging ``sourcemat`` --
+        once per training iteration, in :meth:`structboost.BAE.fit`. It carries
+        the same staleness contract as ``covcache``: reuse it with the same
+        ``sourcemat`` only.
     stepno : int, default=20
         Number of boosting iterations per target.
     nu : float, default=0.1
@@ -377,6 +406,20 @@ def allboost(
             f"sourcemat and targetmat must have same n_samples, got {n} and {targetmat.shape[0]}"
         )
 
+    # Match the target's dtype to the predictors'. Left alone, a float32
+    # `sourcemat` against a float64 `targetmat` makes numpy promote *sourcemat*
+    # inside every predictor-target product -- materializing a full float64 copy
+    # of the design matrix, measured 20-25x slower than the matched-dtype path.
+    # Casting the (n_samples, n_targets) target instead is the cheap direction,
+    # and it fixes the precision of the fit at the predictors', which is where
+    # the O(n) accumulations that actually limit accuracy happen.
+    if (
+        np.issubdtype(sourcemat.dtype, np.floating)
+        and np.issubdtype(targetmat.dtype, np.floating)
+        and sourcemat.dtype != targetmat.dtype
+    ):
+        targetmat = targetmat.astype(sourcemat.dtype, copy=False)
+
     mandatory_per_target = _validate_mandatory_features(mandatory_features, p, k)
     ridge = np.asarray(mandatory_ridge, dtype=np.float64)
     if ridge.ndim == 0:
@@ -396,8 +439,16 @@ def allboost(
         if not np.isfinite(beta_init).all():
             raise ValueError("beta_init must contain only finite values")
 
-    # Precompute column squared norms (used for penalty scaling and residual updates)
-    col_norms_sq = (sourcemat**2).sum(axis=0)
+    # Column squared norms (used for penalty scaling and residual updates). A
+    # caller looping over the same `sourcemat` can hoist this out with
+    # `column_norms_sq` and hand it back; it is otherwise an O(n*p) pass plus a
+    # full (n_samples, n_features) temporary on every single call.
+    if col_norms_sq is None:
+        col_norms_sq = column_norms_sq(sourcemat)
+    else:
+        col_norms_sq = np.asarray(col_norms_sq)
+        if col_norms_sq.shape != (p,):
+            raise ValueError(f"col_norms_sq must have shape ({p},), got {col_norms_sq.shape}")
 
     # Check for zero-variance columns
     if (col_norms_sq == 0).any():
@@ -441,14 +492,37 @@ def allboost(
             raise ValueError(f"covcache must have shape ({p}, {p}), got {covcache.shape}")
         _covcache = covcache
 
+        # A column needs its NaN scan only once per call: after the first look it
+        # is either clean or has just been filled in below, and neither state can
+        # revert -- a later fill of some other column writes values, never NaNs.
+        # Re-scanning on every access spends an O(p) pass per boosting step for
+        # nothing, and the mandatory block alone touches its columns `stepno`
+        # times per target.
+        _verified = np.zeros(p, dtype=bool)
+
         def get_covariance_column(j: int) -> NDArray[np.floating]:
             column = _covcache[:, j]
-            nan_mask = np.isnan(column)
-            if nan_mask.any():
-                computed = sourcemat[:, nan_mask].T @ sourcemat[:, j]
-                column[nan_mask] = computed
-                _covcache[j, nan_mask] = computed
+            if not _verified[j]:
+                nan_mask = np.isnan(column)
+                if nan_mask.any():
+                    computed = sourcemat[:, nan_mask].T @ sourcemat[:, j]
+                    column[nan_mask] = computed
+                    _covcache[j, nan_mask] = computed
+                _verified[j] = True
             return column
+
+    # Starting residual correlations for *every* target at once. One
+    # (n_features, n_targets) matrix product instead of one matrix-vector product
+    # per target: same quantity, but a compute-bound gemm rather than k
+    # memory-bound gemv passes over sourcemat, measured ~3.8x faster. With
+    # `beta_init` the residual is taken at the offset model rather than at zero --
+    # otherwise the first selection step would re-fit signal the offset already
+    # explains -- and that too batches into a single product.
+    if beta_init is None:
+        residuals = targetmat
+    else:
+        residuals = targetmat - sourcemat @ beta_init.T
+    initial_nom = (sourcemat.T @ residuals) / col_norms_sq[:, None]
 
     # Initialize shared state (used if independent=False)
     if not independent:
@@ -461,30 +535,25 @@ def allboost(
             nuvec = np.full(p, nu, dtype=np.float64)
             penvec = col_norms_sq * (1.0 / nu - 1.0)
 
-        curtarget = targetmat[:, t_idx]
-        if beta_init is None:
-            actualnom, _ = _calc_unibeta(sourcemat, curtarget, col_norms_sq)
-            beta = np.zeros(p, dtype=np.float64)
-        else:
-            # Boosting from the offset model F_0 = sourcemat @ beta. `actualnom`
-            # must describe the residual *at* beta, not at zero, or the first
-            # selection step would re-fit signal the offset already explains.
-            # Forming the residual directly costs one O(n*p) matvec; deriving it
-            # from the covariance cache instead would cost one column fetch per
-            # non-zero initial coefficient.
-            beta = beta_init[t_idx].copy()
-            actualnom, _ = _calc_unibeta(sourcemat, curtarget - sourcemat @ beta, col_norms_sq)
+        # `.copy()` is required: actualnom is updated in place below.
+        actualnom = initial_nom[:, t_idx].copy()
+        beta = np.zeros(p, dtype=np.float64) if beta_init is None else beta_init[t_idx].copy()
         mand_idx = mandatory_per_target[t_idx]
+        # Built once per target: nothing in it depends on the boosting step.
+        mand_block = (
+            _MandatoryBlock(mand_idx, col_norms_sq, get_covariance_column, ridge)
+            if mand_idx.size > 0
+            else None
+        )
 
         for step in range(stepno):
-            if mand_idx.size > 0:
+            if mand_block is not None:
                 actualnom, beta = _mandatory_prestep(
                     mand_idx,
                     actualnom,
                     beta,
                     col_norms_sq,
-                    get_covariance_column,
-                    ridge,
+                    mand_block,
                     t_idx,
                 )
 

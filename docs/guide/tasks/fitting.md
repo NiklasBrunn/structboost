@@ -74,10 +74,27 @@ These defaults replaced an earlier `0.3` / `100` pairing, which over-selected
 badly: marker-recovery F1 of 0.72/0.97/0.57 across three
 simulated scenarios, against 0.98/1.00/0.98 for the current defaults.
 
-`boosting_precompute_covcache=True` builds the full *p*×*p* Gram matrix up front, 
-8·*p*² bytes, or 3.2 GB at 20,000 genes. The default lazy cache computes a column
-the first time its gene is selected, so memory scales with the number of
-*distinct selected* genes instead. Precompute only when *p* is small.
+`boosting_precompute_covcache` decides how the predictor Gram matrix is cached.
+The default `"auto"` builds it in full up front whenever 8·*p*² bytes fit a
+conservative share of system memory, and falls back to a lazy column cache when
+they do not. `True` and `False` are honoured exactly, and the resolved decision
+is recorded in `adata.uns["bae"]["boosting_precompute_covcache"]`.
+
+:::{note}
+This reads like a memory setting and is really a **speed** setting. The lazy
+cache computes a column the first time its gene is selected, so its memory
+scales with the number of *distinct selected* genes rather than with *p*² — it
+is strictly cheaper in memory. But building all *p* columns at once is one
+compute-bound matrix product running near hardware peak, while fetching them one
+at a time is a sequence of memory-bound matrix-vector products. Precomputing
+wins from roughly *p*/59 distinct selected genes onwards, and a fit passes that
+in its first iteration, where up to `boosting_stepno × latent_dim` genes can
+enter. Measured end-to-end: **1.6–1.9× faster** at *p* = 2,000–8,000.
+
+The cost is real memory: 8·*p*² is 32 MB at *p* = 2,000, 800 MB at 10,000 and
+3.2 GB at 20,000, transiently doubled while it is built. That is what `"auto"`
+guards. Set `False` explicitly on a memory-constrained machine.
+:::
 
 ### Disentanglement
 
