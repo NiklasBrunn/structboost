@@ -3,7 +3,7 @@
 Releases follow [semantic versioning](https://semver.org). While the project is
 pre-1.0, a minor bump may break API.
 
-### Unreleased
+### [0.2.0] - 2026-08-05
 
 The boosting loop got faster without changing what it computes. Measured
 end-to-end on real preprocessed scRNA-seq (20,000 cells, `latent_dim=10`):
@@ -21,12 +21,20 @@ the same budget, which is what a method whose encoder support keeps drifting
 actually needs.
 
 Stability selection benefits too, and for the default `n_runs=300` that is the
-larger absolute saving: **1.46x** for iteration mode and **1.32x** for subsample
-mode, with peak memory during a subsample run falling from 360 MB to 6 MB at
-p=3,000 — that figure is exactly the float64 copy of the expression matrix
-described below. Subsample mode gains less by construction: every run draws a
-different subset of cells, so its column norms genuinely change and cannot be
-hoisted, and it uses the lazy column cache rather than the full matrix.
+larger absolute saving: **1.79–1.88x** for iteration mode and **1.31–1.39x** for
+subsample mode at p=2,000–3,000, with peak memory during a subsample run falling
+from 360 MB to 5 MB at p=3,000 — that figure is exactly the float64 copy of the
+expression matrix described below. Subsample mode gains less by construction:
+every run draws a different subset of cells, so its column norms genuinely change
+and cannot be hoisted, and it uses the lazy column cache rather than the full
+matrix.
+
+Precomputing the covariance matrix *inside* subsample mode was measured and
+rejected. It runs 3.07x faster at p=2,000 and 2.69x at p=3,000, but 0.73–0.85x
+**slower** from p=6,000 upwards: the number of distinct columns a subsample
+selects stays roughly flat as p grows, so the full p x p product stops paying for
+itself. A memory guard cannot separate those cases — the 800 MB matrix at
+p=10,000 fits comfortably and still loses — so that path stays lazy at every p.
 
 `boosting_precompute_covcache` now defaults to `"auto"` and applies to every
 boosting path, including iteration-mode stability selection, which previously
