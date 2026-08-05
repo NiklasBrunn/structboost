@@ -15,7 +15,7 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
-from ._boosting import allboost
+from ._boosting import allboost, column_norms_sq
 from ._decoder import BAEDecoder
 from ._encoder import BAEEncoder, SplitSoftmax
 from ._types import BAEConfig, TrainingReport
@@ -461,6 +461,8 @@ class BAE(nn.Module):
         self._prior_weights: np.ndarray | None = None
         self._prior_info: dict[str, object] = {}
         self._latent_scaling: dict[str, np.ndarray] | None = None
+        #: Whether the last fit built a full covariance matrix; recorded in uns.
+        self._precomputed_covcache: bool = False
 
         # Move to device
         self.to(self.config.device)
@@ -1935,12 +1937,32 @@ class BAE(nn.Module):
         if n_nuisance:
             mandatory_ridge[self.n_genes :] = nuisance_ridge
 
-        if self.config.boosting_precompute_covcache:
+        # A frozen transfer with no added dimensions never calls allboost at all
+        # (there is nothing left to select), so building a covariance matrix for
+        # it would be pure waste -- 8*p^2 bytes and an O(n*p^2) product for a
+        # cache no one reads.
+        boosts_anything = not (
+            is_transfer
+            and self.config.prior_mode == "frozen"
+            and self._prior_weights.shape[1] >= self.config.latent_dim
+        )
+        from ._utils import resolve_precompute_covcache
+
+        precompute_covcache = boosts_anything and resolve_precompute_covcache(
+            self.config.boosting_precompute_covcache, sourcemat_aug.shape[1]
+        )
+        self._precomputed_covcache = precompute_covcache
+        if precompute_covcache:
             from ._utils import compute_covariance_cache
 
             covcache = compute_covariance_cache(sourcemat_aug)
         else:
             covcache = None  # Lazy computation during allboost
+
+        # `sourcemat_aug` is fixed for the whole fit, so its column norms are too.
+        # allboost recomputes them on every call otherwise -- an O(n*p) pass and a
+        # full-size temporary, once per training iteration.
+        boosting_col_norms_sq = column_norms_sq(sourcemat_aug)
 
         # Optimizer for decoder only
         decoder_optimizer = torch.optim.AdamW(
@@ -2065,6 +2087,7 @@ class BAE(nn.Module):
                     sourcemat_aug,
                     fit_targets,
                     covcache=covcache,
+                    col_norms_sq=boosting_col_norms_sq,
                     stepno=self.config.boosting_stepno,
                     nu=self.config.boosting_nu,
                     csf=self.config.boosting_csf,
@@ -2079,6 +2102,7 @@ class BAE(nn.Module):
                     sourcemat_aug,
                     fit_targets,
                     covcache=covcache,
+                    col_norms_sq=boosting_col_norms_sq,
                     stepno=self.config.boosting_stepno,
                     nu=self.config.boosting_nu,
                     csf=self.config.boosting_csf,
@@ -2373,7 +2397,12 @@ class BAE(nn.Module):
         identical to the training loop; ``tests/test_stability.py`` pins that
         equivalence so the two cannot silently diverge.
         """
-        from ._utils import resolve_mandatory_genes, transform_obs_covariates
+        from ._utils import (
+            compute_covariance_cache,
+            resolve_mandatory_genes,
+            resolve_precompute_covcache,
+            transform_obs_covariates,
+        )
 
         if n_iterations < 1:
             raise ValueError(f"n_iterations must be >= 1, got {n_iterations}")
@@ -2398,11 +2427,15 @@ class BAE(nn.Module):
             else None
         )
 
-        sourcemat_aug = X_np.astype(np.float64)
+        # float32, matching `fit`. This path used to promote to float64 on top of
+        # the float32 copy above -- three copies of the expression matrix resident
+        # at once -- buying a precision difference measured at about one gene in
+        # 380, far inside the run-to-run support variation this method documents.
+        sourcemat_aug = X_np
         n_nuisance = 0
         if self._regresses_encoder:
             D_nuisance = transform_obs_covariates(adata, self._batch_encoding)
-            sourcemat_aug = np.hstack([sourcemat_aug, np.asarray(D_nuisance, dtype=np.float64)])
+            sourcemat_aug = np.hstack([sourcemat_aug, np.asarray(D_nuisance, dtype=np.float32)])
             n_nuisance = self._batch_encoding.n_columns
 
         resolved_mandatory = resolve_mandatory_genes(self._mandatory_genes, adata)
@@ -2410,6 +2443,17 @@ class BAE(nn.Module):
         mandatory_ridge = np.zeros(sourcemat_aug.shape[1], dtype=np.float64)
         if n_nuisance:
             mandatory_ridge[self.n_genes :] = self.config.nuisance_ridge
+        # Fixed across every iteration recorded here, exactly as in `fit`.
+        boosting_col_norms_sq = column_norms_sq(sourcemat_aug)
+        # Honour the same covariance-cache setting `fit` resolved. Without this,
+        # the method documented as mirroring the fit loop would run a different
+        # cache strategy from the fit it is analysing.
+        if resolve_precompute_covcache(
+            self.config.boosting_precompute_covcache, sourcemat_aug.shape[1]
+        ):
+            covcache_initial = compute_covariance_cache(sourcemat_aug)
+        else:
+            covcache_initial = None
 
         # Snapshot so the fitted model is unchanged when this returns.
         saved_encoder = self.encoder.linear.weight.detach().clone()
@@ -2431,7 +2475,7 @@ class BAE(nn.Module):
 
         reference_unit = _unit_rows(reference)
 
-        covcache = None
+        covcache = covcache_initial
         latent_dim = reference.shape[0]
         prior_dims = self._prior_weights.shape[1] if self._prior_weights is not None else 0
         counts = np.zeros((self.n_genes, latent_dim), dtype=np.float64)
@@ -2476,6 +2520,7 @@ class BAE(nn.Module):
                         sourcemat_aug,
                         fit_targets,
                         covcache=covcache,
+                        col_norms_sq=boosting_col_norms_sq,
                         stepno=self.config.boosting_stepno,
                         nu=self.config.boosting_nu,
                         csf=self.config.boosting_csf,
@@ -2772,11 +2817,12 @@ class BAE(nn.Module):
             sample_weights=weights_t,
         )
 
-        sourcemat = X_np.astype(np.float64)
+        # float32, matching `fit`; see _iteration_support_frequency.
+        sourcemat = X_np
         n_nuisance = 0
         if self._regresses_encoder:
             D_nuisance = transform_obs_covariates(adata, self._batch_encoding)
-            sourcemat = np.hstack([sourcemat, np.asarray(D_nuisance, dtype=np.float64)])
+            sourcemat = np.hstack([sourcemat, np.asarray(D_nuisance, dtype=np.float32)])
             n_nuisance = self._batch_encoding.n_columns
 
         resolved_mandatory = resolve_mandatory_genes(self._mandatory_genes, adata)
@@ -3351,6 +3397,9 @@ class BAE(nn.Module):
         if hasattr(self, "_mandatory_genes") and self._mandatory_genes is not None:
             uns_dict["mandatory_genes"] = _mandatory_genes_for_uns(self._mandatory_genes)
         uns_dict["batch_integration_mode"] = self._batch_integration_mode
+        # The *resolved* decision, not the setting: "auto" is the default, so
+        # without this a run does not record which strategy it actually used.
+        uns_dict["boosting_precompute_covcache"] = bool(self._precomputed_covcache)
         if self._batch_encoding is not None:
             uns_dict["batch_key"] = self._batch_encoding.obs_columns
             uns_dict["batch_columns"] = self._batch_encoding.encoded_columns

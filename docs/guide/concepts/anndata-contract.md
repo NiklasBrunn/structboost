@@ -56,7 +56,12 @@ Note the encoder matrix is stored transposed relative to the internal
 
 Always present after a fit:
 
-`latent_dim`, `is_fitted`, `training_history`, `latent_init`, `disentanglement`.
+`latent_dim`, `is_fitted`, `training_history`, `latent_init`, `disentanglement`,
+`boosting_precompute_covcache`.
+
+`boosting_precompute_covcache` records the *resolved* covariance-cache
+strategy, not the setting: the default is `"auto"`, so without this a run
+does not say which strategy it actually used.
 
 Present when the corresponding feature was used:
 

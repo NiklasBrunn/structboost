@@ -303,8 +303,12 @@ def stability_selection(
     -------
     StabilitySelectionResult
     """
-    sourcemat = np.asarray(sourcemat, dtype=np.float64)
-    targetmat = np.asarray(targetmat, dtype=np.float64)
+    # Dtype is the caller's; allboost aligns the target to the predictors.
+    # Forcing float64 here used to double the memory of every BAE-driven call
+    # (the caller already holds a float32 copy) for a precision difference
+    # measured at about one gene in 380.
+    sourcemat = np.asarray(sourcemat)
+    targetmat = np.asarray(targetmat)
     n = sourcemat.shape[0]
     if targetmat.shape[0] != n:
         raise ValueError(
@@ -351,6 +355,17 @@ def stability_selection(
         idx = rng.choice(n, size=sub_n, replace=False)
         # A fresh covcache per subsample is mandatory: the Gram matrix depends on
         # the rows, so the full-data cache would silently produce wrong updates.
+        #
+        # Deliberately lazy, unlike `BAE.fit`, which precomputes the whole Gram by
+        # default. Building it per subsample was measured and rejected: on real
+        # data at n=15,000 it runs 3.07x faster at p=2,000 and 2.69x at p=3,000,
+        # but 0.73-0.85x *slower* from p=6,000 upwards. The crossover is governed
+        # by the number of distinct columns a subsample actually selects, which
+        # stays roughly flat (~110-240) as p grows, so the full p x p product
+        # stops paying for itself. A memory guard cannot separate those cases --
+        # the 800 MB Gram at p=10,000 fits comfortably and still loses -- and any
+        # p threshold would be calibrated on one dataset's support size. Left
+        # lazy, which is the safe direction at every p.
         betamat = allboost(
             sourcemat[idx],
             targetmat[idx],

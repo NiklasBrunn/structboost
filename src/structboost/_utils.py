@@ -64,7 +64,68 @@ def compute_covariance_cache(
         np.dot(sourcemat.T, sourcemat, out=out)
         return out
 
-    return np.dot(sourcemat.T, sourcemat).astype(np.float64, copy=False)
+    # Fortran order, so that ``covcache[:, j]`` -- the only way allboost ever
+    # reads this matrix -- is a contiguous vector rather than a stride of 8*p
+    # bytes. Reading a column of the C-ordered equivalent touches one cache line
+    # per element and measured 4-9x slower inside the boosting loop.
+    #
+    # The values are identical either way; only the layout differs. numpy will
+    # not write a gemm result straight into an F-ordered ``out``, so this costs
+    # one transient copy of the p x p matrix at build time -- negligible against
+    # the O(n*p^2) product itself, but it does mean the peak allocation here is
+    # briefly twice the returned size.
+    return np.asfortranarray(np.dot(sourcemat.T, sourcemat), dtype=np.float64)
+
+
+#: Fraction of total system memory the automatic covariance-cache decision is
+#: willing to spend on the p x p Gram matrix. Deliberately conservative: the
+#: matrix is transiently doubled while it is built (see
+#: :func:`compute_covariance_cache`), and a fit needs room for the expression
+#: matrix and the decoder besides.
+_PRECOMPUTE_MEMORY_FRACTION = 0.25
+
+#: Used when the platform does not expose its physical memory (non-POSIX).
+_PRECOMPUTE_FALLBACK_BUDGET = 2 * 1024**3
+
+
+def _total_memory_bytes() -> int | None:
+    """Physical memory, or None where the platform will not say."""
+    try:
+        import os
+
+        return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
+    except (ValueError, AttributeError, OSError):  # pragma: no cover - platform dependent
+        return None
+
+
+def resolve_precompute_covcache(setting: bool | str, n_features: int) -> bool:
+    """Decide whether to build the full covariance matrix up front.
+
+    ``True``/``False`` are honoured exactly; ``"auto"`` precomputes whenever the
+    ``8 * n_features**2`` byte matrix fits the memory budget above.
+
+    Precomputing is not merely a way to avoid recomputing columns. Building all
+    ``p`` columns at once is a single compute-bound matrix product running near
+    hardware peak, whereas fetching them one at a time is a sequence of
+    memory-bound matrix-vector products; measured on real data the former wins
+    from roughly ``p/59`` distinct selected features onwards, and a BAE fit
+    passes that in its first iteration (``boosting_stepno * latent_dim``
+    candidates). The decision here is therefore about memory, not about how many
+    columns will be needed.
+    """
+    if setting is True or setting is False:
+        return bool(setting)
+    if setting != "auto":
+        raise ValueError(
+            f"boosting_precompute_covcache must be True, False or 'auto', got {setting!r}"
+        )
+    total = _total_memory_bytes()
+    budget = (
+        int(total * _PRECOMPUTE_MEMORY_FRACTION)
+        if total is not None
+        else _PRECOMPUTE_FALLBACK_BUDGET
+    )
+    return 8 * int(n_features) ** 2 <= budget
 
 
 def disentangle_boosting_targets(
