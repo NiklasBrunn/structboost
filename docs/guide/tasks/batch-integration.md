@@ -57,6 +57,23 @@ as strictly dominated. On simulated data with a known batch effect it left *more
 batch variance in the latent than doing nothing: R² 0.38 against a 0.35
 uncorrected baseline, versus 0.006 for concatenation.
 
+## If you subset to highly variable genes first
+
+With several batches, prefer `flavor="seurat_v3_paper"`:
+
+```python
+sc.pp.highly_variable_genes(
+    adata, n_top_genes=2000, flavor="seurat_v3_paper",
+    layer="counts", batch_key="batch",
+)
+```
+
+scanpy's `"seurat_v3"` ranks a gene only in the batches where it registers, so
+one variable in a single batch can outrank one variable in all of them. Such a
+gene is nearly a batch indicator, and boosting is greedy enough to spend a whole
+latent dimension on it. Neither mechanism above stops that: `"encoder"` removes
+only the covariate's linear effect from the design.
+
 ## Near-collinear covariates
 
 Boosting refits the mandatory block jointly at every step, and that block is the
