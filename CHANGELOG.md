@@ -3,6 +3,52 @@
 Releases follow [semantic versioning](https://semver.org). While the project is
 pre-1.0, a minor bump may break API.
 
+### [0.4.0] - 2026-08-12
+
+Three defaults change. No configuration fields are added or removed, and anyone
+who sets these explicitly is unaffected.
+
+**`enable_early_stopping` now defaults to `False`.** The criterion is a
+convergence check being used as a quality check. There is no validation split, so
+the training loss cannot see a model that is starting to memorize, and patience
+fires long before the model is done: measured against ground truth it stopped at
+iteration 90 on a dataset peaking at 259, and at 196 on a simulated scenario
+peaking at 560, returning marker-recovery F1 0.502 against 0.787. Across three
+real datasets (mouse cortex, human pancreas, human immune) the best iteration
+ranged from 154 to 1975 — always past where patience fires.
+
+**No stopping rule replaced it, deliberately.** Latent stability, encoder-support
+overlap and held-out reconstruction were each measured as candidates and each
+rejected. The representation settles long before gene selection does — on one
+dataset consecutive latent codes were rank-identical while the gene set still
+turned over 65% cumulatively — and no observable signal tracks the quality peak.
+A latent-stability rule was built and tuned; it fired at iteration ~109 on all
+three real datasets regardless of where quality peaked, and on one of them it was
+worse than not stopping at all. It is not shipped, not even off by default: an
+option that should never be enabled is pure carrying cost, which is the same
+argument that removed four fields in 0.3.0. `max_iterations=1000` is a defensible
+middle of the measured range, not an optimum.
+
+**`BAE.stability_selection(threshold=...)` now defaults to `0.5`, from `0.7`.**
+0.7 is too aggressive whenever the latent representation is still moving: across
+three real datasets it removed 21-52% of recovered marker genes relative to the
+fitted encoder, and 0-7% even when the representation had settled. At 0.5 the
+worst loss over the same six runs was 6%. The standalone
+`structboost.stability_selection` keeps 0.7, because its Meinshausen-Buhlmann
+bound is undefined at or below 0.5.
+
+**The `dim_match_quality` warning now fires below 0.85, from 0.5.** It is the gate
+on whether iteration frequencies mean anything: they describe gene-set drift only
+if the counted iterations describe one representation. Runs sitting at 0.70-0.79 —
+comfortably above the old warning — already lost a quarter to a half of their
+recovered markers at the default threshold, while runs at 0.93 and above lost
+none. The guide now documents it as a lookup: at least 0.93, either threshold is
+safe; 0.70-0.79, use 0.3-0.5 and prefer the flat union.
+
+Also fixed: the gene-selection guide still showed
+`fit(adata, stability_selection="iteration")`, which stopped being valid in 0.3.0
+when that argument became a bool.
+
 ### [0.3.0] - 2026-08-11
 
 **Breaking.** Five settings are gone and `BAE.stability_selection` has one mode

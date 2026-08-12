@@ -143,7 +143,7 @@ intercept, so it assumes near-centered targets — true of `z*` in practice, sin
 | `decoder_lr` | `1e-3` |
 | `decoder_updates_per_iteration` | `10` |
 | `max_iterations` | `1000` |
-| `enable_early_stopping` | `True` |
+| `enable_early_stopping` | `False` |
 | `early_stopping_patience` | `50` |
 | `batch_size` | `512` |
 
@@ -153,6 +153,33 @@ coupling between the two optimizers, and the quantity it scales has no natural
 unit. `∂L/∂z` tracks the decoder's magnitude, which grows by orders of magnitude
 over a fit, so a value that suits one training stage will not suit the next. The
 alternation is what adapts; this stays fixed.
+
+### Early stopping is off by default
+
+Changed in 0.4.0. The criterion is a *convergence* check being used as a *quality*
+check, and it stops far too early. There is no validation split, so the training
+loss cannot see a model that is starting to memorize.
+
+Measured against ground truth, patience-50 stopped at iteration 90 on a dataset
+whose marker recovery peaked at 259, and at 196 on a simulated scenario peaking at
+560 — returning F1 0.502 against 0.787. Across three real datasets the best
+iteration ranged from **154 to 1975**, always past where patience fires.
+
+:::{warning}
+**No stopping rule replaced it, because none was found that works.** Latent
+stability, encoder-support overlap and held-out reconstruction were each measured
+as candidates. The representation settles long before gene selection does — on one
+dataset consecutive latent codes were rank-identical while the gene set still
+turned over 65% cumulatively — and no observable signal tracks the quality peak.
+The best iteration varies by an order of magnitude between datasets, so no fixed
+budget works either.
+
+Run the iteration budget and let {meth}`~structboost.BAE.stability_selection`
+absorb the variance. That is what it is for.
+:::
+
+`max_iterations=1000` is a defensible middle of the measured 154–1975 range, not an
+optimum. Nothing better is available.
 
 `fit` always restores the best checkpoint's encoder, decoder and nuisance weights
 at the end, whether or not early stopping triggered.

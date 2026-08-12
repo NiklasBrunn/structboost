@@ -1271,6 +1271,29 @@ def test_bae_nuisance_only_needs_no_obs_for_reconstruction():
     assert model.reconstruct(without_obs).shape == x.shape
 
 
+def test_fit_runs_the_full_budget_by_default():
+    """Early stopping is off by default, so a fit uses its whole iteration budget.
+
+    Changed in 0.4.0: the training-loss criterion is a convergence check standing in
+    for a quality check, and it fires long before marker recovery peaks.
+    """
+    _require_bae_deps()
+    import anndata as ad
+
+    from structboost import BAE, BAEConfig
+
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=(40, 12)).astype(np.float32)
+    x = (x - x.mean(axis=0)) / x.std(axis=0)
+    adata = ad.AnnData(x)
+    config = BAEConfig(latent_dim=2, max_iterations=6, early_stopping_patience=1)
+    assert config.enable_early_stopping is False
+    BAE(12, config).fit(adata, verbose=False)
+
+    # Patience 1 would have stopped almost immediately had it been active.
+    assert len(adata.uns["bae"]["training_history"]["train_loss"]) == 6
+
+
 def test_variance_explained_is_written_by_a_plain_fit():
     """It is a quality metric, not a covariate one.
 

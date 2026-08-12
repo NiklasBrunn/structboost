@@ -56,7 +56,7 @@ well. Stability selection turns that one list into a per-gene frequency.
 > else on its loss plateau?*
 
 ```python
-res = model.stability_selection(adata, n_runs=300, threshold=0.7)
+res = model.stability_selection(adata, n_runs=300, threshold=0.5)
 
 adata.varm["BAE_iteration_frequency"]   # (n_genes, latent_dim)
 res.dim_match_quality                   # did dimensions keep their identity?
@@ -79,8 +79,21 @@ true markers 88% of the time.
 
 Dimensions are Hungarian-matched to the fitted model by maximum absolute cosine
 before counting; that anchoring is what gives a dimension index a stable meaning.
-`dim_match_quality` reports how well it held (~0.84 measured). Below 0.5 a warning
-fires and `frequency.max(axis=1)`, the flat union, is the safer readout.
+`dim_match_quality` reports how well it held (~0.84 measured). **Read it before
+trusting the result**: it is the gate on whether these frequencies mean anything.
+
+Iteration frequencies only describe gene-set drift if the iterations describe *one*
+representation. When they do not, a frequency threshold prunes genes that are
+merely attached to a different version of the latent space. Measured across three
+real datasets:
+
+| `dim_match_quality` | what happens at `threshold=0.7` |
+| --- | --- |
+| ≥ 0.93 | 0–7% of recovered markers lost; 0.5–0.7 both safe |
+| 0.70–0.79 | **21–52% of recovered markers lost** — use 0.3–0.5 |
+
+Below 0.85 a warning fires, and `frequency.max(axis=1)`, the flat union, is the
+safer readout than the per-dimension split.
 
 `n_runs=300` is the default because the support autocorrelation decays slowly.
 Short windows give near-duplicate samples.
@@ -162,8 +175,9 @@ model than `fit()` alone, and would compound if called twice. It is also not a
 strictly better encoder but a **choice**, precision bought with recall, and
 that trade belongs to you.
 
-To move along that trade-off, lower `threshold` rather than reaching for a
-different estimator. The threshold *is* the dial.
+To move along that trade-off, raise or lower `threshold` rather than reaching for
+a different estimator. The threshold *is* the dial, and it behaves monotonically:
+precision up and recall down as it rises, in every run measured.
 
 :::{danger}
 On a **frozen transfer model**, `apply_encoder(res.stable_encoder())` would
@@ -177,10 +191,10 @@ Pass `preserve_prior=True` (the default). See {doc}`transfer`.
 ## Running one automatically after training
 
 ```python
-model.fit(adata, stability_selection="iteration")
+model.fit(adata, stability_selection=True)
 ```
 
-This uses the method defaults (`n_runs=300`, `threshold=0.7`). Call the method
+This uses the method defaults (`n_runs=300`, `threshold=0.5`). Call the method
 directly when you want control over them.
 
 ## References

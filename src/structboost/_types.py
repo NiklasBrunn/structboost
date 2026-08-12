@@ -166,12 +166,27 @@ class BAEConfig:
     max_iterations
         Maximum number of training iterations.
     enable_early_stopping
-        If True (default), stop training early when the checkpoint-selection loss
-        does not decrease for `early_stopping_patience` iterations. This is the
-        decoder training MSE for ``disentanglement="none"`` and
-        ``"leave_one_out"``; for ``"correlation"`` it additionally includes the
-        weighted disentanglement penalty. If False, train for exactly
-        `max_iterations`.
+        If True, stop training early when the checkpoint-selection loss does not
+        decrease for `early_stopping_patience` iterations. This is the decoder
+        training MSE for ``disentanglement="none"`` and ``"leave_one_out"``; for
+        ``"correlation"`` it additionally includes the weighted disentanglement
+        penalty. **Default False**: train for exactly `max_iterations`.
+
+        The default changed in 0.4.0 because the criterion is a *convergence*
+        check being used as a *quality* check, and it stops far too early. There
+        is no validation split, so the training loss cannot see a model that is
+        beginning to memorize; measured against ground truth it stopped at
+        iteration 90 on one dataset whose marker recovery peaked at 259, and at
+        196 on a simulated scenario peaking at 560 (returning F1 0.502 against
+        0.787). Across three real datasets the best iteration ranged from 154 to
+        1975, always past where patience fires.
+
+        No stopping rule replaced it, because none was found that works. Latent
+        stability, support overlap and held-out reconstruction were each measured
+        as candidates; the representation settles long before gene selection
+        does, and nothing observable tracks the quality peak. Run the iteration
+        budget and let :meth:`BAE.stability_selection` absorb the variance
+        instead — that is what it is for.
     early_stopping_patience
         Number of consecutive iterations without checkpoint-selection loss
         improvement required to trigger early stopping. Only used if
@@ -215,7 +230,7 @@ class BAEConfig:
     decoder_weight_decay: float = 0.0
     decoder_updates_per_iteration: int = 10
     max_iterations: int = 1000
-    enable_early_stopping: bool = True
+    enable_early_stopping: bool = False
     early_stopping_patience: int = 50
     batch_size: int = 2**9
     seed: int | None = None

@@ -394,6 +394,55 @@ def test_iteration_loop_matches_the_training_loop():
     np.testing.assert_array_equal(supports_cont[0], second_iteration_support)
 
 
+def test_shipped_defaults_are_the_measured_ones():
+    """The three 0.4.0 defaults, pinned so they cannot drift back silently.
+
+    Each replaced a value measured to be harmful: patience-50 early stopping stops
+    before the quality peak on every dataset tried (best iteration 154-1975);
+    threshold 0.7 removes 21-52% of recovered markers when the latent is still
+    moving; and the 0.5 dim_match_quality warning never fired on runs at 0.70-0.79
+    that had already lost a quarter to a half of their markers.
+    """
+    import inspect
+
+    from structboost import BAE, BAEConfig
+    from structboost import stability_selection as standalone
+    from structboost._model import _DIM_MATCH_WARN
+
+    assert BAEConfig().enable_early_stopping is False
+    assert inspect.signature(BAE.stability_selection).parameters["threshold"].default == 0.5
+    assert _DIM_MATCH_WARN == 0.85
+
+    # The standalone function keeps 0.7: its Meinshausen-Buhlmann bound is
+    # undefined at or below 0.5, so the two defaults differ deliberately.
+    assert inspect.signature(standalone).parameters["threshold"].default == 0.7
+
+
+def test_poor_dimension_matching_warns_below_the_gate():
+    """The gate must fire when dimensions stop keeping their identity.
+
+    A short fit on structured data permutes its dimensions enough to land under the
+    gate, which is the case the warning exists for: the counted iterations are then
+    describing different representations, and a frequency threshold prunes genes
+    attached to the wrong one.
+    """
+    _require_bae()
+    from structboost import BAE, BAEConfig, sim_scrnaseq_anndata
+    from structboost._model import _DIM_MATCH_WARN
+
+    a = sim_scrnaseq_anndata(n=300, n_genes=120, stageno=4, stagep=10, seed=2)
+    model = BAE(
+        a.n_vars,
+        BAEConfig(latent_dim=4, max_iterations=20, enable_early_stopping=False, seed=0),
+    )
+    model.fit(a, verbose=False)
+
+    with pytest.warns(UserWarning, match="matched the fitted model poorly") as caught:
+        res = model.stability_selection(a, n_runs=6, seed=0, verbose=False)
+    assert res.dim_match_quality < _DIM_MATCH_WARN
+    assert f"below {_DIM_MATCH_WARN}" in str(caught[0].message)
+
+
 def test_iteration_mode_rejects_bad_arguments():
     pytest.importorskip("torch")
     adata = _tiny_adata()

@@ -108,7 +108,7 @@ single fit is one arbitrary position on the optimizer's plateau. See
 with a confident vocabulary.
 
 ```python
-res = model.stability_selection(adata, mode="iteration")
+res = model.stability_selection(adata)
 stable = [adata.var_names[res.stable_support[:, j]] for j in range(res.frequency.shape[1])]
 ```
 

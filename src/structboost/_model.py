@@ -29,6 +29,14 @@ if TYPE_CHECKING:
 # "iteration" is generated at the end, not accumulated.
 _REPORT_FIELDS: tuple[str, ...] = tuple(TrainingReport.__dataclass_fields__)
 
+# Below this mean matched |cosine| between an iteration's latent dimensions and the
+# fitted model's, iteration-mode stability frequencies stop describing a single
+# representation and a frequency threshold becomes destructive. Raised from 0.5 in
+# 0.4.0: measured runs sitting at 0.70-0.79 already lost a quarter to a half of
+# their recovered markers at the default threshold, while runs at 0.93 and above
+# lost none.
+_DIM_MATCH_WARN: float = 0.85
+
 # Per-group reconstruction losses are reported only for obs columns with at most
 # this many levels; beyond it the breakdown is per-cell noise rather than a
 # summary. Columns above the limit are skipped with a warning, never silently.
@@ -2404,11 +2412,16 @@ class BAE(nn.Module):
             self.decoder.load_state_dict(saved_decoder)
 
         quality = float(np.mean(match_scores)) if match_scores else float("nan")
-        if np.isfinite(quality) and quality < 0.5:
+        if np.isfinite(quality) and quality < _DIM_MATCH_WARN:
             warnings.warn(
                 f"Latent dimensions matched the fitted model poorly across iterations "
-                f"(mean |cosine| {quality:.2f}). Per-dimension frequencies are unreliable "
-                "here; use frequency.max(axis=1) for the flat union instead.",
+                f"(mean |cosine| {quality:.2f}, below {_DIM_MATCH_WARN}). The counted "
+                "iterations are not describing one representation, so a frequency "
+                "threshold prunes genes that are simply attached to a different "
+                "version of the latent space: measured on real data this removed "
+                "21-52% of recovered markers at the default threshold. Lower "
+                "`threshold` to 0.3-0.5, and prefer frequency.max(axis=1), the flat "
+                "union, over the per-dimension split.",
                 UserWarning,
                 stacklevel=3,
             )
@@ -2429,7 +2442,7 @@ class BAE(nn.Module):
         adata: AnnData,
         *,
         n_runs: int = 300,
-        threshold: float = 0.7,
+        threshold: float = 0.5,
         seed: int | None = None,
         verbose: bool = True,
     ):
@@ -2472,7 +2485,19 @@ class BAE(nn.Module):
             ~0.45 at lag 100 on measured data), so short windows give highly
             correlated, near-duplicate samples.
         threshold
-            Selection-frequency cutoff for the stable support.
+            Selection-frequency cutoff for the stable support. Default 0.5,
+            lowered from 0.7 in 0.4.0.
+
+            0.7 was measured to be too aggressive whenever the latent
+            representation is still moving: across three real datasets it removed
+            21-52% of recovered marker genes relative to the fitted encoder, and
+            0-7% even when the representation had settled. At 0.5 the worst loss
+            over the same six runs was 6%. Raising it back toward 0.7-0.9 buys
+            precision and is reasonable when ``dim_match_quality`` is high; see
+            that field on the result before doing so.
+
+            Note the standalone :func:`structboost.stability_selection` keeps 0.7,
+            because its Meinshausen-Buhlmann bound is undefined at or below 0.5.
         seed
             Seeds torch for the continued training iterations.
         verbose
