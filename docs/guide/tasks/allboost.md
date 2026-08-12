@@ -17,7 +17,6 @@ betamat = allboost(
     stepno=20,
     nu=0.1,
     csf=0.9,
-    mode="standard",
     independent=True,
 )
 # betamat: (n_targets, n_features) -- note the orientation

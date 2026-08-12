@@ -106,22 +106,33 @@ def test_disentangle_boosting_targets():
     # In two dimensions simultaneous leave-one-out residualization flips the
     # correlation sign without reducing its magnitude. This pins the method's
     # actual mathematics and prevents it being presented as exact orthogonalization.
+    #
+    # Exact only on centered columns: the projection carries no intercept, so a
+    # shared offset dominates it. Measured on this pair, a +5 shift sends the
+    # correlation to -0.999 instead of -0.640.
     pair = targets[:, :2]
-    pair_result = disentangle_boosting_targets(pair, standardize=True)
+    pair = pair - pair.mean(axis=0)
+    pair_result = disentangle_boosting_targets(pair)
     before = np.corrcoef(pair, rowvar=False)[0, 1]
     after = np.corrcoef(pair_result, rowvar=False)[0, 1]
     assert after == pytest.approx(-before, abs=1e-12)
+
+    shifted = disentangle_boosting_targets(pair + 5.0)
+    shifted_corr = np.corrcoef(shifted, rowvar=False)[0, 1]
+    assert abs(shifted_corr) > abs(before), "the no-intercept caveat stopped holding"
 
     single = rng.standard_normal((50, 1))
     result_single = disentangle_boosting_targets(single)
     assert result_single.shape == single.shape
     np.testing.assert_array_equal(result_single, single)
 
+    # Unequal column scales must not destabilize the residualization; the method
+    # preserves them rather than standardizing them away.
     unequal_var = rng.standard_normal((100, 3))
     unequal_var[:, 0] *= 10
-    result_std = disentangle_boosting_targets(unequal_var, standardize=True)
-    assert result_std.shape == unequal_var.shape
-    assert not np.any(np.isnan(result_std))
+    result_unequal = disentangle_boosting_targets(unequal_var)
+    assert result_unequal.shape == unequal_var.shape
+    assert not np.any(np.isnan(result_unequal))
 
 
 def test_bae_fit_with_leave_one_out_disentanglement():
@@ -163,7 +174,6 @@ def test_disentanglement_config_api_and_validation():
     config = BAEConfig()
     assert config.disentanglement == "none"
     assert config.disentanglement_lambda == pytest.approx(1e-4)
-    assert not config.disentanglement_standardize
     assert "disentangle_targets" not in BAEConfig.__dataclass_fields__
     assert "disentangle_standardize" not in BAEConfig.__dataclass_fields__
 
@@ -172,8 +182,6 @@ def test_disentanglement_config_api_and_validation():
     for value in (-1.0, np.nan, np.inf):
         with pytest.raises(ValueError, match="must be finite and >= 0"):
             BAEConfig(disentanglement_lambda=value)
-    with pytest.raises(ValueError, match="only available"):
-        BAEConfig(disentanglement="correlation", disentanglement_standardize=True)
 
 
 def test_correlation_disentanglement_loss_and_descent_direction():
@@ -198,25 +206,6 @@ def test_correlation_disentanglement_loss_and_descent_direction():
     moved_correlation, moved_variance = BAE._correlation_disentanglement_loss(moved)
     moved_loss = moved_correlation + 0.1 * moved_variance
     assert float(moved_loss.detach()) < float(combined.detach())
-
-
-def test_weighted_correlation_loss_matches_explicit_replication():
-    """Weighted moments describe the same pseudo-population as repeated cells."""
-    _require_bae_deps()
-    import torch
-
-    from structboost import BAE
-
-    z = torch.tensor(
-        [[-1.0, 0.2], [0.5, 1.3], [2.0, -0.7]],
-        dtype=torch.float64,
-    )
-    weights = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
-    repeated = torch.repeat_interleave(z, weights.to(torch.int64), dim=0)
-    weighted = BAE._correlation_disentanglement_loss(z, weights)
-    explicit = BAE._correlation_disentanglement_loss(repeated)
-    for observed, expected in zip(weighted, explicit, strict=True):
-        torch.testing.assert_close(observed, expected)
 
 
 def test_correlation_target_step_is_independent_of_n_cells():
@@ -339,62 +328,6 @@ def test_correlation_disentanglement_reduces_fitted_latent_correlation():
 
     assert correlations["correlation"] < 0.6 * correlations["none"]
     assert np.all(variances["correlation"] > 1e-4)
-
-
-def test_bae_standardize_targets_enabled():
-    """Test BAE with standardize_targets=True (not the default, which is False)."""
-    _require_bae_deps()
-
-    import anndata as ad
-
-    from structboost import BAE, BAEConfig
-
-    rng = np.random.default_rng(42)
-    x = rng.normal(size=(64, 32)).astype(np.float32)
-    adata = ad.AnnData(x)
-
-    config = BAEConfig(
-        latent_dim=4,
-        decoder_hidden_dims=(16,),
-        max_iterations=3,
-        enable_early_stopping=False,
-        standardize_targets=True,
-        device="cpu",
-    )
-    model = BAE(n_genes=adata.n_vars, config=config)
-    model.fit(adata, verbose=False)
-
-    assert "X_bae" in adata.obsm
-    assert not np.any(np.isnan(adata.obsm["X_bae"]))
-
-
-def test_bae_standardize_targets_disabled():
-    """Test BAE with standardize_targets=False, which is the default."""
-    _require_bae_deps()
-
-    import anndata as ad
-
-    from structboost import BAE, BAEConfig
-
-    assert BAEConfig().standardize_targets is False
-
-    rng = np.random.default_rng(42)
-    x = rng.normal(size=(64, 32)).astype(np.float32)
-    adata = ad.AnnData(x)
-
-    config = BAEConfig(
-        latent_dim=4,
-        decoder_hidden_dims=(16,),
-        max_iterations=3,
-        enable_early_stopping=False,
-        standardize_targets=False,  # Disabled
-        device="cpu",
-    )
-    model = BAE(n_genes=adata.n_vars, config=config)
-    model.fit(adata, verbose=False)
-
-    assert "X_bae" in adata.obsm
-    assert not np.any(np.isnan(adata.obsm["X_bae"]))
 
 
 def test_bae_config_decoder_weight_decay_default():
@@ -1338,7 +1271,34 @@ def test_bae_nuisance_only_needs_no_obs_for_reconstruction():
     assert model.reconstruct(without_obs).shape == x.shape
 
 
-def test_bae_balance_obs_and_ridge_metadata():
+def test_variance_explained_is_written_by_a_plain_fit():
+    """It is a quality metric, not a covariate one.
+
+    It used to be written only when a covariate argument was passed, which left
+    the workflow documented in `reading-quality.md` — compare
+    `uns["bae"]["variance_explained"]` against `linear_ceiling` — raising
+    KeyError on an ordinary `fit(adata)`.
+    """
+    _require_bae_deps()
+    import anndata as ad
+
+    from structboost import BAE, BAEConfig
+
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=(48, 16)).astype(np.float32)
+    x = (x - x.mean(axis=0)) / x.std(axis=0)
+    adata = ad.AnnData(x)
+    BAE(16, BAEConfig(latent_dim=2, max_iterations=2, enable_early_stopping=False)).fit(
+        adata, verbose=False
+    )
+
+    assert "variance_explained" in adata.uns["bae"]
+    assert np.isfinite(adata.uns["bae"]["variance_explained"])
+    # The per-group breakdown stays behind the covariate guard.
+    assert "reconstruction_loss_by_obs" not in adata.uns["bae"]
+
+
+def test_bae_ridge_and_per_group_loss_metadata():
     _require_bae_deps()
     import anndata as ad
     import pandas as pd
@@ -1366,10 +1326,8 @@ def test_bae_balance_obs_and_ridge_metadata():
         adata,
         batch_key="batch",
         batch_integration_mode="encoder",
-        balance_obs="batch",
         verbose=False,
     )
-    assert adata.uns["bae"]["balance_obs"] == "batch"
     assert adata.uns["bae"]["nuisance_ridge"] == pytest.approx(0.1)
     assert set(adata.uns["bae"]["reconstruction_loss_by_obs"]["batch"]) == {
         "large",
@@ -1549,26 +1507,6 @@ def test_loss_pre_boost_is_reported_as_mean_mse():
 
     expected = model._full_recon_loss(xt, None)[0]
     assert stats["loss_pre_boost"] == pytest.approx(expected, rel=1e-6)
-
-
-def test_standardize_targets_leaves_near_constant_column_unscaled():
-    """A near-constant column must not be inflated to unit variance.
-
-    `std == 0` is not a sufficient guard: a dimension carrying only numerical
-    noise has a tiny but nonzero standard deviation.
-    """
-    _require_bae_deps()
-
-    from structboost import BAE
-
-    targets = np.zeros((10, 2))
-    targets[:, 0] = np.linspace(0.0, 1.0, 10)  # real signal
-    targets[:, 1] = 1e-30 * np.arange(10)  # noise-level, nonzero std
-
-    out = BAE._standardize_targets(targets)
-
-    assert out[:, 0].std() == pytest.approx(1.0, rel=1e-6)
-    assert np.abs(out[:, 1]).max() < 1e-20
 
 
 def test_decoder_init_depends_only_on_seed_not_on_conditioning():

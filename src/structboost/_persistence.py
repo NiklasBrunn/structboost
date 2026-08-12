@@ -51,11 +51,19 @@ MAGIC = "structboost.bae"
 #:
 #: 4 — ``BAEConfig.boosting_mode`` was dropped with ``allboost``'s refine mode.
 #: ``restore_payload`` splats the stored config into ``BAEConfig``, so a format-3
-#: file would otherwise die on an unexpected keyword argument. Every format below
-#: this one predates the first public release.
-CHECKPOINT_FORMAT = 4
+#: file would otherwise die on an unexpected keyword argument. Formats 1-3 predate
+#: the first public release; 4 was released as 0.2.0.
+#:
+#: 5 — four ``BAEConfig`` fields dropped (``decoder_dropout_rate``,
+#: ``decoder_use_batch_norm``, ``disentanglement_standardize``,
+#: ``standardize_targets``) plus the ``balance_obs`` payload key. Same splatting
+#: hazard as format 4. Unlike every earlier bump this one *does* break files
+#: written by a released version (0.2.0), and no migration is written: the method
+#: is under active development and a checkpoint is cheap to regenerate, whereas a
+#: compatibility shim for options that no longer exist is not.
+CHECKPOINT_FORMAT = 5
 #: Oldest format this install can read.
-MIN_CHECKPOINT_FORMAT = 4
+MIN_CHECKPOINT_FORMAT = 5
 
 #: Category element types that survive the round trip with their comparison
 #: semantics intact. ``bool`` precedes ``int`` because ``bool`` is a subclass of
@@ -243,7 +251,6 @@ def build_payload(model: BAE) -> dict[str, Any]:
         "batch_encoding": _encode_encoding(model._batch_encoding),
         "batch_integration_mode": str(model._batch_integration_mode),
         "batch_weights": (None if model._batch_weights is None else _tensor(model._batch_weights)),
-        "balance_obs": model._balance_obs,
         "mandatory_genes": _to_primitive(model._mandatory_genes),
         "prior_weights": None if prior is None else _tensor(prior),
         "prior_info": _to_primitive(model._prior_info, coerce_unknown=True),
@@ -301,7 +308,6 @@ def restore_payload(cls: type[BAE], payload: dict[str, Any], device: Any) -> BAE
     model._batch_integration_mode = payload["batch_integration_mode"]
     batch_weights = payload["batch_weights"]
     model._batch_weights = None if batch_weights is None else _array(batch_weights)
-    model._balance_obs = payload["balance_obs"]
     model._mandatory_genes = payload["mandatory_genes"]
 
     prior = payload["prior_weights"]

@@ -45,81 +45,66 @@ A collinear mandatory block raises rather than silently regularizing (a redundan
 dummy level, for instance). Drop the redundant column, or pass `nuisance_ridge`
 explicitly. Ridge changes the estimates, so it is never applied automatically.
 
-## Two stability modes
+## Stability selection
 
-Both freeze the model, recompute the boosting targets `z*` once, and re-solve the
-encoder's boosting problem many times. Both cost a fraction of one fit and need
-no refitting. Both are non-destructive, and the model is restored afterwards.
-
-They measure **different** sources of instability, so they complement rather than
-replace each other.
-
-### Iteration mode (the default)
+A single fit gives one gene list, and that list is not reproducible: in a
+high-dimensional space with correlated genes the encoder support is not
+identifiable, and a fit returns one of many sets that reconstruct about equally
+well. Stability selection turns that one list into a per-gene frequency.
 
 > *Would these genes still be selected if the optimizer had stopped somewhere
 > else on its loss plateau?*
 
 ```python
-res = model.stability_selection(adata, mode="iteration", n_runs=300, threshold=0.7)
+res = model.stability_selection(adata, n_runs=300, threshold=0.7)
 
 adata.varm["BAE_iteration_frequency"]   # (n_genes, latent_dim)
 res.dim_match_quality                   # did dimensions keep their identity?
 ```
 
-This runs `n_runs` further training iterations from the fitted state, recording
-the support after each boosting step. Measured as the best of the three readouts:
-FDR 0.26, against 0.31 for subsampling and 0.38 for a single fit. Genes selected
-in 90–100% of iterations are true markers 88% of the time.
+This continues training from the fitted state for `n_runs` further iterations,
+recording the encoder support after each boosting step, then restores the model,
+so the call is non-destructive.
+
+That is the variance source that dominates. The encoder support does not converge
+even when the reconstruction loss does: on measured data the loss plateaus at ~95%
+of the achievable linear ceiling while consecutive iterations share only about a
+third of their selected genes, with the support autocorrelation still ~0.45 at lag
+100 and no periodicity, a slow random walk over a plateau. A single fit reports one
+arbitrary position on that walk.
+
+Measured as the best of the available readouts: FDR 0.26, against 0.31 for cell
+subsampling and 0.38 for a single fit. Genes selected in 90–100% of iterations are
+true markers 88% of the time.
 
 Dimensions are Hungarian-matched to the fitted model by maximum absolute cosine
-before counting, that anchoring is what gives a dimension index a stable
-meaning. `dim_match_quality` reports how well it held (~0.84 measured). Below
-0.5 a warning fires and `frequency.max(axis=1)`, the flat union, is the safer
-readout.
+before counting; that anchoring is what gives a dimension index a stable meaning.
+`dim_match_quality` reports how well it held (~0.84 measured). Below 0.5 a warning
+fires and `frequency.max(axis=1)`, the flat union, is the safer readout.
 
 `n_runs=300` is the default because the support autocorrelation decays slowly.
 Short windows give near-duplicate samples.
 
 :::{warning}
-Iteration mode provides **no formal error control**. `expected_false_positives`
-is deliberately `NaN` rather than a number that would look like a guarantee, 
-training iterations are neither independent nor exchangeable.
+Stability selection here provides **no formal error control**.
+`expected_false_positives` is deliberately `NaN` rather than a number that would
+look like a guarantee: training iterations are neither independent nor
+exchangeable, so the Meinshausen–Bühlmann bound does not apply.
+
+For a bound with a derivation behind it, the standalone
+{func}`structboost.stability_selection` resamples cells in the Meinshausen–Bühlmann
+scheme [^mb2010]. It operates on an `allboost` problem directly rather than on a
+fitted BAE. Note that on simulated data where the truth is known, that bound was
+measured to be **violated by roughly an order of magnitude** in the BAE setting
+(mean realized 2.57 false positives per dimension against a bound of 0.20) — the
+targets `z*` come from a model fitted on the same cells being resampled, which is
+not the fixed-in-advance inference problem the theory assumes.
 :::
 
-### Subsample mode
+### What this does not capture
 
-> *Would these genes still be selected on a different sample of cells?*
-
-```python
-res = model.stability_selection(adata, mode="subsample", n_runs=100, threshold=0.7)
-
-adata.varm["BAE_selection_frequency"]
-res.expected_false_positives             # Meinshausen-Bühlmann bound
-```
-
-Meinshausen–Bühlmann subsampling [^mb2010] without replacement at half the cells.
-`0.5` is the fraction their theory is derived for. Bootstrap resampling is
-deliberately not offered, because sampling with replacement breaks the exchangeability
-the bound relies on.
-
-:::{danger}
-**The error bound does not hold here.** On simulated data where the truth is
-known, the Meinshausen–Bühlmann bound is violated by roughly an order of
-magnitude: mean realized 2.57 false positives per dimension against a bound of
-0.20, satisfied in 15 of 60 dimensions.
-
-The likely cause is a scope error rather than an implementation bug. The bound
-assumes exchangeable subsamples of an inference problem fixed in advance, whereas
-the targets `z*` here come from a model fitted on the same cells being resampled.
-
-**Treat `expected_false_positives` as a diagnostic, not a guarantee.** This mode
-is retained for investigation.
-:::
-
-### What neither mode captures
-
-Both measure stability *conditional on the learned representation*. Neither
-captures the variability from re-initializing and refitting the autoencoder to a
+It measures stability *conditional on the learned representation*. It does not
+capture the variability from re-initializing and refitting the autoencoder to a
 different local optimum.
 
 On simulated data the per-gene frequencies track a full-refit gold standard
@@ -144,10 +129,10 @@ single time, with a sign that flips, is not stable. Measured at ~0.999 on real
 data, so in practice a guard rather than a headline.
 
 :::{note}
-`coefficient_sd` is a **spread, not a standard error**. Subsample runs share half
-their cells by construction and iteration runs are autocorrelated, so the
-effective sample size is far below `n_runs`. `sd / sqrt(n_runs)` would be badly
-overconfident. Reporting it as a precision would require a block bootstrap.
+`coefficient_sd` is a **spread, not a standard error**. Iteration runs are
+autocorrelated, so the effective sample size is far below `n_runs`, and
+`sd / sqrt(n_runs)` would be badly overconfident. Reporting it as a precision
+would require a block bootstrap.
 :::
 
 Per-dimension gene sets:
@@ -216,5 +201,6 @@ directly when you want control over them.
 
 - {meth}`~structboost.BAE.stability_selection`, {class}`~structboost.StabilitySelectionResult`
 - {func}`structboost.stability_selection`: the standalone `allboost`-level
-  function of the same name, subsample-only, with different defaults
+  function of the same name, which resamples cells rather than iterating, and has
+  its own defaults
 - {doc}`interpreting`: what the selected genes mean

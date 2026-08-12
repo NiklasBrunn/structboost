@@ -55,11 +55,7 @@ class BAEDecoder(nn.Module):
 
         for i in range(len(dims) - 1):
             layers.append(nn.Linear(dims[i], dims[i + 1]))
-            if config.decoder_use_batch_norm:
-                layers.append(nn.BatchNorm1d(dims[i + 1]))
             layers.append(self.activation)
-            if config.decoder_dropout_rate > 0:
-                layers.append(nn.Dropout(config.decoder_dropout_rate))
 
         self.hidden = nn.Sequential(*layers)
         # Final projection to output space
@@ -82,8 +78,6 @@ class BAEDecoder(nn.Module):
         """Reinitialize all learnable parameters."""
         for module in self.modules():
             if isinstance(module, nn.Linear):
-                module.reset_parameters()
-            elif isinstance(module, nn.BatchNorm1d):
                 module.reset_parameters()
 
     def forward(self, z: torch.Tensor, covariates: torch.Tensor | None = None) -> torch.Tensor:

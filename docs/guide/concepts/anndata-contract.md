@@ -40,10 +40,10 @@ on a query dataset annotates that dataset in place.
   - `fit`, `apply_encoder`
 * - `BAE_iteration_frequency`
   - `(n_genes, latent_dim)`
-  - `stability_selection(mode="iteration")`
+  - {meth}`~structboost.BAE.stability_selection`
 * - `BAE_selection_frequency`
   - `(n_genes, latent_dim)`
-  - `stability_selection(mode="subsample")`
+  - the standalone {func}`structboost.stability_selection`
 * - `bae_program_weights`
   - `(n_genes, 2 * latent_dim)`
   - `transform_splitsoftmax`
@@ -57,7 +57,7 @@ Note the encoder matrix is stored transposed relative to the internal
 Always present after a fit:
 
 `latent_dim`, `is_fitted`, `training_history`, `latent_init`, `disentanglement`,
-`boosting_precompute_covcache`.
+`boosting_precompute_covcache`, `variance_explained`.
 
 `boosting_precompute_covcache` records the *resolved* covariance-cache
 strategy, not the setting: the default is `"auto"`, so without this a run
@@ -73,8 +73,8 @@ Present when the corresponding feature was used:
   - Written when
 * - `layer`
   - the fit read a layer rather than `adata.X`
-* - `disentanglement_lambda` / `disentanglement_standardize`
-  - the matching disentanglement method was selected
+* - `disentanglement_lambda`
+  - `disentanglement="correlation"`
 * - `training_report`
   - `diagnostics=True`
 * - `mandatory_genes`
@@ -83,10 +83,8 @@ Present when the corresponding feature was used:
   - `batch_key` was passed
 * - `batch_weights`, `nuisance_ridge`
   - the mode included `"encoder"`
-* - `balance_obs`
-  - `balance_obs` was passed
-* - `latent_obs_r2_per_dim`, `variance_explained`, `reconstruction_loss_by_obs`
-  - any covariate argument was passed
+* - `latent_obs_r2_per_dim`, `reconstruction_loss_by_obs`
+  - `batch_key` was passed
 * - `stability_selection`
   - a stability run was performed
 * - `encoder_source`
@@ -96,12 +94,6 @@ Present when the corresponding feature was used:
 :::{note}
 `layer` is absent, not `None`, when the fit read `adata.X`. AnnData's `uns`
 cannot hold `None`, and no key is the honest encoding of "the default".
-:::
-
-:::{warning}
-`variance_explained` is only written when a covariate argument was used. A plain
-`fit(adata)` does not produce it. Compute it yourself against
-{func}`~structboost.linear_ceiling` instead. See {doc}`reading-quality`.
 :::
 
 ## The two metrics people confuse

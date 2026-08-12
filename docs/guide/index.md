@@ -47,8 +47,7 @@ support, and neither stability mode gives you usable error control.
 Name the covariate once with `batch_key`, and `batch_integration_mode` decides
 which of two mechanisms act on it: giving it to the decoder, regressing it out
 inside the boosting fit so it cannot confound gene selection, or both, which is
-the default. A separate `balance_obs` reweights groups, with an important limit
-on how far that reweighting reaches.
+the default.
 
 `transform` stays gene-only and needs no batch labels. That is what makes the
 encoder deployable on data with no covariate annotation.
@@ -110,9 +109,7 @@ Each is explained where it belongs, and each has bitten someone:
   - Where
 * - `mandatory_genes` does not guarantee a non-zero weight
   - {doc}`tasks/gene-selection`
-* - `balance_obs` does not balance *gene selection*, only targets and losses
-  - {doc}`tasks/batch-integration`
-* - Subsample-mode error bounds are violated by ~10× on ground-truth data
+* - Stability selection carries no formal error control
   - {doc}`tasks/gene-selection`
 * - `novel_variance_share` on training data is not evidence of novel biology
   - {doc}`tasks/transfer`

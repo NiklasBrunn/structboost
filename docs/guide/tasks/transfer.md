@@ -127,16 +127,12 @@ ordinary fit.
 
 ## What a transfer fit rejects
 
-Four hard errors, each for a reason:
+Three hard errors, each for a reason:
 
 `split_softmax`
 : applies one softmax across all 2·`latent_dim` entries, so adding dimensions
   dilutes every prior entry by a data-dependent amount. A frozen matrix would no
   longer mean the prior programs act unchanged.
-
-`standardize_targets` with `prior_mode="anchored"`
-: rescaling each target column to unit variance puts fitted coefficients on a
-  per-iteration scale the fixed anchor does not share.
 
 `init_pca` / `init_obsm`
 : they override the latent state on the first boosting iteration, which is

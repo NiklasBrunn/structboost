@@ -451,7 +451,6 @@ class BAE(nn.Module):
         self._batch_encoding = None
         self._batch_integration_mode: str = "none"
         self._batch_weights: np.ndarray | None = None
-        self._balance_obs: str | None = None
         self._mandatory_genes = None
         #: Layer `fit` read expression from; None means ``adata.X``. Later calls
         #: default to it so a model always reads the representation it learned on.
@@ -753,10 +752,15 @@ class BAE(nn.Module):
                 f"up to {CHECKPOINT_FORMAT}. Upgrade structboost to load it."
             )
         if written_format < MIN_CHECKPOINT_FORMAT:
+            # Deliberately no migration: formats are dropped when a BAEConfig field
+            # goes, and `restore_payload` splats the stored config into BAEConfig,
+            # so an old file carries settings the class no longer has. Refitting is
+            # cheap; a shim for options that no longer exist is not.
             raise ValueError(
-                f"{source} uses checkpoint format {written_format}, which predates the first "
-                f"public release; this install reads format {MIN_CHECKPOINT_FORMAT} and newer. "
-                "Refit the model to write a current checkpoint."
+                f"{source} uses checkpoint format {written_format}, written by structboost "
+                f"{payload.get('structboost_version', 'unknown')}; this install reads format "
+                f"{MIN_CHECKPOINT_FORMAT} and newer, and no migration is provided. Refit the "
+                "model to write a current checkpoint."
             )
         resolved = cls._resolve_load_device(device, source, payload)
         return restore_payload(cls, payload, resolved)
@@ -873,13 +877,6 @@ class BAE(nn.Module):
                 "dimensions dilutes every prior entry by a data-dependent amount — a "
                 "frozen matrix would no longer mean the prior programs act unchanged."
             )
-        if self.config.standardize_targets and self.config.prior_mode == "anchored":
-            raise ValueError(
-                "standardize_targets is not supported with prior_mode='anchored'. "
-                "Rescaling each target column to unit variance puts the fitted "
-                "coefficients on a per-iteration scale that the fixed anchor does not "
-                "share. Use prior_mode='frozen', or standardize_targets=False."
-            )
         if init_pca or init_obsm is not None:
             raise ValueError(
                 "init_pca/init_obsm cannot be combined with a prior encoder matrix: "
@@ -978,28 +975,17 @@ class BAE(nn.Module):
     # --- Hybrid Training Helpers ---
 
     @staticmethod
-    def _recon_loss(
-        x_recon: torch.Tensor,
-        x: torch.Tensor,
-        sample_weights: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Reconstruction MSE, optionally weighted per cell.
+    def _recon_loss(x_recon: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        """Reconstruction MSE, as a single fused reduction over all elements.
 
-        Without weights this is a single fused reduction over all elements. That
-        matters beyond speed: reducing per cell and then averaging reassociates the
-        float32 sum and shifts results by ~1e-7 relative against releases that
-        predate per-cell weighting, for every user who never asked for weights.
-        The per-cell path is taken only when weights are actually supplied.
+        Deliberately not reassociated into a per-cell mean followed by an average:
+        that shifts the float32 result by ~1e-7 relative for no gain.
         """
-        if sample_weights is None:
-            return nn.functional.mse_loss(x_recon, x)
-        per_cell = (x_recon - x).square().mean(dim=1)
-        return (per_cell * sample_weights).sum() / sample_weights.sum()
+        return nn.functional.mse_loss(x_recon, x)
 
     @staticmethod
     def _correlation_disentanglement_loss(
         z: torch.Tensor,
-        sample_weights: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Squared latent correlation and a relative anti-collapse barrier.
 
@@ -1017,10 +1003,6 @@ class BAE(nn.Module):
         ----------
         z
             Latent codes of shape ``(n_cells, latent_dim)``.
-        sample_weights
-            Optional non-negative cell weights. When supplied, the weighted mean
-            and covariance describe the same balanced pseudo-population used by
-            the reconstruction target loss.
 
         Returns
         -------
@@ -1039,18 +1021,8 @@ class BAE(nn.Module):
         if z.ndim != 2:
             raise ValueError(f"z must be 2-D, got shape {tuple(z.shape)}")
 
-        if sample_weights is None:
-            centered = z - z.mean(dim=0, keepdim=True)
-            covariance = centered.T @ centered / z.shape[0]
-        else:
-            if sample_weights.ndim != 1 or sample_weights.shape[0] != z.shape[0]:
-                raise ValueError(
-                    f"sample_weights must have shape (n_cells,), got {tuple(sample_weights.shape)}"
-                )
-            weight_sum = sample_weights.sum()
-            mean = (z * sample_weights[:, None]).sum(dim=0, keepdim=True) / weight_sum
-            centered = z - mean
-            covariance = centered.T @ (centered * sample_weights[:, None]) / weight_sum
+        centered = z - z.mean(dim=0, keepdim=True)
+        covariance = centered.T @ centered / z.shape[0]
 
         variances = torch.diagonal(covariance)
         relative_eps = variances.mean().detach() * _DISENTANGLEMENT_RELATIVE_EPS + z.new_tensor(
@@ -1078,7 +1050,6 @@ class BAE(nn.Module):
         *,
         lr: float = 1.0,
         obs_covariates: torch.Tensor | None = None,
-        sample_weights: torch.Tensor | None = None,
         stats: dict[str, float] | None = None,
         z_override: torch.Tensor | None = None,
     ) -> np.ndarray:
@@ -1107,8 +1078,9 @@ class BAE(nn.Module):
         own reconstruction error; averaging over genes keeps it stable when
         ``n_genes`` changes.
 
-        This holds per cell only because the decoder runs in eval mode below, so
-        batch-norm uses running statistics and does not couple cells together.
+        This holds per cell: the decoder is a deterministic per-cell function, and
+        it is run in eval mode below so that any future stateful layer cannot
+        quietly couple cells into each other's targets.
 
         Parameters
         ----------
@@ -1118,8 +1090,6 @@ class BAE(nn.Module):
             Step size for gradient descent direction.
         obs_covariates
             Optional obs covariate tensor for cVAE decoder conditioning.
-        sample_weights
-            Optional non-negative per-cell weights with mean one.
         stats
             Optional dict filled in place with ``"target_grad_norm"`` and
             ``"loss_pre_boost"``. Both quantities are already computed here, so
@@ -1148,23 +1118,17 @@ class BAE(nn.Module):
         # Compute gradient of reconstruction loss w.r.t. z (through split-softmax)
         h = self.split_softmax_layer(z) if self.split_softmax_layer else z
         x_recon = self.decoder(h, obs_covariates)
-        loss = self._recon_loss(x_recon, X, sample_weights)
+        loss = self._recon_loss(x_recon, X)
         # Sum over cells, mean over genes. See the docstring: this is what makes a
         # cell's target step independent of how many other cells are in the dataset.
-        # Unweighted, that is exactly `n_cells` times the elementwise mean.
-        target_loss = (
-            loss * X.shape[0]
-            if sample_weights is None
-            else ((x_recon - X).square().mean(dim=1) * sample_weights).sum()
-        )
+        # That is exactly `n_cells` times the elementwise mean.
+        target_loss = loss * X.shape[0]
         # Only dL/dz is needed. `torch.autograd.grad` skips accumulating gradients
         # into the decoder parameters, which `loss.backward()` would compute and
         # leave in `.grad` for the decoder optimizer to discard on its next
         # `zero_grad()`. Same convention as `_full_recon_loss`.
         if self.config.disentanglement == "correlation":
-            correlation_loss, variance_loss = self._correlation_disentanglement_loss(
-                z, sample_weights
-            )
+            correlation_loss, variance_loss = self._correlation_disentanglement_loss(z)
             # The reconstruction target loss sums over cells. Correlation and
             # variance are population averages, so multiply them by n_cells to
             # keep the per-cell regularizer gradient, and therefore lambda's
@@ -1193,7 +1157,6 @@ class BAE(nn.Module):
         k_steps: int,
         *,
         D_train: torch.Tensor | None = None,
-        sample_weights: torch.Tensor | None = None,
     ) -> float:
         """Update decoder via minibatch SGD.
 
@@ -1207,19 +1170,13 @@ class BAE(nn.Module):
             Number of SGD steps to perform.
         D_train
             Optional obs covariate tensor for cVAE decoder conditioning.
-        sample_weights
-            Optional non-negative per-cell weights with mean one.
 
         Returns
         -------
         Average loss over the k steps.
         """
         self.decoder.train()
-        tensors = [X]
-        if D_train is not None:
-            tensors.append(D_train)
-        if sample_weights is not None:
-            tensors.append(sample_weights)
+        tensors = [X] if D_train is None else [X, D_train]
         dataset = TensorDataset(*tensors)
         loader = DataLoader(dataset, batch_size=self.config.batch_size, shuffle=True)
         total_loss = 0.0
@@ -1227,13 +1184,8 @@ class BAE(nn.Module):
 
         for _ in range(k_steps):
             for batch_data in loader:
-                if D_train is not None:
-                    x_batch, d_batch = batch_data[0], batch_data[1]
-                    w_batch = batch_data[2] if sample_weights is not None else None
-                else:
-                    x_batch = batch_data[0]
-                    d_batch = None
-                    w_batch = batch_data[1] if sample_weights is not None else None
+                x_batch = batch_data[0]
+                d_batch = batch_data[1] if D_train is not None else None
                 optimizer.zero_grad()
                 # The encoder is fitted by boosting and is in no optimizer, so its
                 # gradient is never read. Detaching keeps backward from computing a
@@ -1243,7 +1195,7 @@ class BAE(nn.Module):
                     z = self.encoder(x_batch)
                 h = self.split_softmax_layer(z) if self.split_softmax_layer else z
                 x_recon = self.decoder(h, d_batch)
-                loss = self._recon_loss(x_recon, x_batch, w_batch)
+                loss = self._recon_loss(x_recon, x_batch)
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item()
@@ -1255,12 +1207,7 @@ class BAE(nn.Module):
 
         return total_loss / max(steps_done, 1)
 
-    def _checkpoint_selection_loss(
-        self,
-        train_loss: float,
-        X: torch.Tensor,
-        sample_weights: torch.Tensor | None,
-    ) -> float:
+    def _checkpoint_selection_loss(self, train_loss: float, X: torch.Tensor) -> float:
         """Objective used for early stopping and best-state restoration.
 
         Reconstruction-only fits preserve the historical ``train_loss`` criterion.
@@ -1272,9 +1219,7 @@ class BAE(nn.Module):
             return train_loss
         with torch.no_grad():
             z = self.encoder(X)
-            correlation_loss, variance_loss = self._correlation_disentanglement_loss(
-                z, sample_weights
-            )
+            correlation_loss, variance_loss = self._correlation_disentanglement_loss(z)
             penalty = self.config.disentanglement_lambda * (
                 correlation_loss + _DISENTANGLEMENT_VARIANCE_WEIGHT * variance_loss
             )
@@ -1341,7 +1286,6 @@ class BAE(nn.Module):
         n_epochs: int,
         *,
         D: torch.Tensor | None = None,
-        sample_weights: torch.Tensor | None = None,
         verbose: bool = False,
         desc: str = "Pre-training decoder",
     ) -> float:
@@ -1366,11 +1310,7 @@ class BAE(nn.Module):
         -------
         Mean reconstruction loss over the final epoch.
         """
-        tensors = [Z, X]
-        if D is not None:
-            tensors.append(D)
-        if sample_weights is not None:
-            tensors.append(sample_weights)
+        tensors = [Z, X] if D is None else [Z, X, D]
         dataset = TensorDataset(*tensors)
         loader = DataLoader(dataset, batch_size=self.config.batch_size, shuffle=True)
         self.decoder.train()
@@ -1383,9 +1323,7 @@ class BAE(nn.Module):
                 h = self.split_softmax_layer(z_batch) if self.split_softmax_layer else z_batch
                 optimizer.zero_grad()
                 covariates = batch[2] if D is not None else None
-                weight_index = 3 if D is not None else 2
-                weights = batch[weight_index] if sample_weights is not None else None
-                loss = self._recon_loss(self.decoder(h, covariates), x_batch, weights)
+                loss = self._recon_loss(self.decoder(h, covariates), x_batch)
                 loss.backward()
                 optimizer.step()
                 total += loss.item()
@@ -1400,14 +1338,13 @@ class BAE(nn.Module):
         X: torch.Tensor,
         D: torch.Tensor | None,
         *,
-        sample_weights: torch.Tensor | None = None,
         grad: bool = False,
     ) -> tuple[float, float]:
         """Full-data reconstruction MSE, and optionally the decoder gradient norm.
 
-        Always runs the decoder in eval mode so dropout and batch-norm statistics
-        are untouched and no RNG is consumed; gradients are taken with
-        ``torch.autograd.grad`` so nothing accumulates into ``.grad``. Together
+        Always runs the decoder in eval mode, so a future stateful layer cannot
+        make a diagnostic pass mutate the model or consume RNG; gradients are taken
+        with ``torch.autograd.grad`` so nothing accumulates into ``.grad``. Together
         these keep diagnostics read-only with respect to the fitted model.
         """
         was_training = self.decoder.training
@@ -1417,12 +1354,12 @@ class BAE(nn.Module):
                 with torch.no_grad():
                     z = self.encoder(X)
                     h = self.split_softmax_layer(z) if self.split_softmax_layer else z
-                    loss = self._recon_loss(self.decoder(h, D), X, sample_weights)
+                    loss = self._recon_loss(self.decoder(h, D), X)
                     return float(loss), float("nan")
 
             z = self.encoder(X)
             h = self.split_softmax_layer(z) if self.split_softmax_layer else z
-            loss = self._recon_loss(self.decoder(h, D), X, sample_weights)
+            loss = self._recon_loss(self.decoder(h, D), X)
             params = [p for p in self.decoder.parameters() if p.requires_grad]
             grads = torch.autograd.grad(loss, params, retain_graph=False)
             norm = float(torch.sqrt(sum((g**2).sum() for g in grads)))
@@ -1437,7 +1374,6 @@ class BAE(nn.Module):
         *,
         X: torch.Tensor,
         D: torch.Tensor | None,
-        sample_weights: torch.Tensor | None,
         targets: np.ndarray,
         prev_W: np.ndarray | None,
     ) -> np.ndarray:
@@ -1489,7 +1425,7 @@ class BAE(nn.Module):
             )
 
         # Loss decomposition across the two halves of the alternation.
-        loss_c, dec_grad = self._full_recon_loss(X, D, sample_weights=sample_weights, grad=True)
+        loss_c, dec_grad = self._full_recon_loss(X, D, grad=True)
         loss_a = stats["loss_pre_boost"]
         loss_b = stats["loss_post_boost"]
         series["loss_pre_boost"].append(loss_a)
@@ -1510,34 +1446,6 @@ class BAE(nn.Module):
         std_ok = np.abs(np.median(col_stds) - 1.0) < tol
         return mean_ok and std_ok
 
-    #: Columns with a standard deviation below this are treated as constant and
-    #: left unscaled. Matches the guard in ``disentangle_boosting_targets``.
-    _STD_EPS: float = 1e-12
-
-    @staticmethod
-    def _standardize_targets(targets: np.ndarray) -> np.ndarray:
-        """Standardize targets to zero mean and unit variance per column.
-
-        Columns whose standard deviation falls below ``_STD_EPS`` are left
-        unscaled. Testing ``std == 0`` is not enough: a latent dimension carrying
-        almost no signal has a tiny but nonzero standard deviation, and dividing
-        by it inflates pure numerical noise to unit variance, handing a dead
-        dimension the same weight in the boosting step as a real one.
-
-        Parameters
-        ----------
-        targets
-            Target matrix of shape (n_samples, latent_dim).
-
-        Returns
-        -------
-        Standardized target matrix.
-        """
-        mean = targets.mean(axis=0, keepdims=True)
-        std = targets.std(axis=0, keepdims=True)
-        std = np.where(std < BAE._STD_EPS, 1.0, std)
-        return (targets - mean) / std
-
     # --- AnnData Integration (scverse conventions) ---
 
     @staticmethod
@@ -1556,7 +1464,6 @@ class BAE(nn.Module):
         mandatory_genes: list[str] | list[int] | np.ndarray | list | None = None,
         batch_key: str | list[str] | None = None,
         batch_integration_mode: Literal["encoder", "decoder", "both"] = _MODE_UNSET,  # type: ignore[assignment]
-        balance_obs: str | None = None,
         max_iterations: int | None = None,
         early_stopping_patience: int | None = None,
         enable_early_stopping: bool | None = None,
@@ -1567,7 +1474,7 @@ class BAE(nn.Module):
         init_pca: bool = False,
         init_pretrain_epochs: int = 0,
         decoder_warmup_epochs: int = 0,
-        stability_selection: str | bool | None = None,
+        stability_selection: bool = False,
     ) -> BAE:
         """Fit BAE using hybrid boosting+SGD training.
 
@@ -1577,10 +1484,9 @@ class BAE(nn.Module):
            where L_target sums the squared error over cells and averages it over
            genes (see ``_compute_boosting_targets``)
         2. (Optional) Applying leave-one-out target residualization
-        3. (Optional) Standardizing targets for optimal boosting convergence
-        4. Resetting encoder weights to zero
-        5. Fitting encoder via allboost to map X → z*
-        6. Updating decoder via minibatch SGD
+        3. Resetting encoder weights to zero
+        4. Fitting encoder via allboost to map X → z*
+        5. Updating decoder via minibatch SGD
 
         Parameters
         ----------
@@ -1633,26 +1539,6 @@ class BAE(nn.Module):
 
             The ridge that stabilizes the ``"encoder"`` mechanism when covariates
             are near-collinear lives on :class:`BAEConfig` as ``nuisance_ridge``.
-        balance_obs
-            Optional categorical obs column used to inverse-frequency weight the
-            *reconstruction losses*, giving each observed level equal total weight
-            so that a large group cannot dominate the fit.
-
-            Scope, precisely: the weights enter the boosting-target gradient, the
-            decoder update, the reported losses and the diagnostics. They do **not**
-            enter the ``allboost`` fit itself, which remains ordinary (unweighted)
-            least squares. So the targets the encoder chases are balanced, but the
-            projection of those targets onto genes is not, and gene selection still
-            leans toward the larger group. Making it a true weighted least squares
-            would require weighted column norms, weighted inner products and a
-            weight-dependent covariance cache throughout ``_boosting.py``.
-
-            Measured effect on a deliberately imbalanced 500/90/45 design: the
-            spread in per-group reconstruction MSE fell from 0.231 to 0.150.
-            Check ``adata.uns["bae"]["reconstruction_loss_by_obs"]`` to see whether
-            it helped on your data — and check first whether group size actually
-            predicts fit quality, because uneven per-group reconstruction has causes
-            other than imbalance.
         max_iterations
             Maximum training iterations (overrides config).
         early_stopping_patience
@@ -1698,19 +1584,7 @@ class BAE(nn.Module):
             those programs could explain, and the new dimensions would re-learn it.
         stability_selection
             Run :meth:`stability_selection` once after training and store its
-            results in ``adata``. One of:
-
-            ``None`` (default)
-                Skip it.
-            ``"subsample"``
-                Meinshausen-Bühlmann cell resampling; error-controlled.
-            ``"iteration"``
-                Frequency over further training iterations; targets the larger
-                variance source on measured data but provides no error bound.
-
-            A single argument rather than a flag plus a mode, so the combination
-            "disabled, but with a mode" cannot be expressed. ``True`` is accepted as
-            a deprecated alias for ``"subsample"``. Call the method directly for
+            results in ``adata``. Off by default; call the method directly for
             control over ``n_runs`` and ``threshold``.
 
         Returns
@@ -1721,9 +1595,7 @@ class BAE(nn.Module):
         -----
         The warm start is applied once, on the first iteration only: it sets the
         boosting targets, so the encoder learns the supplied representation and the
-        decoder is then trained against the encoder's output. With
-        ``standardize_targets=True`` the warm-start targets are standardized like
-        any others, preserving the structure of the representation but not its scale.
+        decoder is then trained against the encoder's output.
 
         With ``config.disentanglement="correlation"``, the soft penalty is applied
         inside step 1 rather than as a target transformation. Early stopping and
@@ -1760,11 +1632,6 @@ class BAE(nn.Module):
             batch_mode = "both" if batch_integration_mode is _MODE_UNSET else batch_integration_mode
         conditions_decoder, regresses_encoder = _BATCH_MODES[batch_mode]
         nuisance_ridge = self.config.nuisance_ridge
-        if stability_selection not in (None, False, True, "subsample", "iteration"):
-            raise ValueError(
-                "stability_selection must be None, 'subsample' or 'iteration', "
-                f"got {stability_selection!r}"
-            )
 
         resolved_mandatory = resolve_mandatory_genes(mandatory_genes, adata)
         self._mandatory_genes = mandatory_genes
@@ -1841,12 +1708,6 @@ class BAE(nn.Module):
 
         # Use full dataset for training (no validation split)
         X_train = self._to_tensor(X_np, self.config.device)
-        raw_weights = self._balance_weights(adata, balance_obs)
-        sample_weights: torch.Tensor | None = (
-            torch.from_numpy(raw_weights).to(self.config.device)
-            if raw_weights is not None
-            else None
-        )
 
         # Covariance cache for boosting (uses training data only)
         X_train_np = X_train.cpu().numpy()
@@ -1981,7 +1842,6 @@ class BAE(nn.Module):
                 decoder_optimizer,
                 init_pretrain_epochs,
                 D=D_condition,
-                sample_weights=sample_weights,
                 verbose=verbose,
                 desc="Decoder pre-training (warm start)",
             )
@@ -2011,7 +1871,6 @@ class BAE(nn.Module):
                     decoder_optimizer,
                     decoder_warmup_epochs,
                     D=D_condition,
-                    sample_weights=sample_weights,
                     verbose=verbose,
                     desc="Decoder warm-up (prior only)",
                 )
@@ -2050,7 +1909,6 @@ class BAE(nn.Module):
                 X_train,
                 lr=self.config.target_optim_lr,
                 obs_covariates=D_condition,
-                sample_weights=sample_weights,
                 stats=diag_stats if collect_diagnostics else None,
                 z_override=z_init if iteration == 0 else None,
             )
@@ -2061,18 +1919,12 @@ class BAE(nn.Module):
             if self.config.disentanglement == "leave_one_out":
                 from ._utils import disentangle_boosting_targets
 
-                targets = disentangle_boosting_targets(
-                    targets, standardize=self.config.disentanglement_standardize
-                )
+                targets = disentangle_boosting_targets(targets)
 
-            # STEP 3 (optional): Standardize targets for optimal boosting convergence
-            if self.config.standardize_targets:
-                targets = self._standardize_targets(targets)
-
-            # STEP 4: Reset encoder weights before boosting (rebuild from scratch)
+            # STEP 3: Reset encoder weights before boosting (rebuild from scratch)
             self.encoder.reset_weights()
 
-            # STEP 5: Fit encoder via boosting to map X → targets. On a transfer
+            # STEP 4: Fit encoder via boosting to map X → targets. On a transfer
             # model the prior columns are either withheld ("frozen") or boosted
             # from the fixed original matrix as an offset ("anchored").
             fit_targets, beta_init, fit_mandatory = self._transfer_boosting_inputs(
@@ -2122,20 +1974,17 @@ class BAE(nn.Module):
             # Loss with the new encoder but the old decoder: isolates the
             # boosting step's effect from the decoder's.
             if collect_diagnostics:
-                diag_stats["loss_post_boost"] = self._full_recon_loss(
-                    X_train, D_condition, sample_weights=sample_weights
-                )[0]
+                diag_stats["loss_post_boost"] = self._full_recon_loss(X_train, D_condition)[0]
 
-            # STEP 6: Update decoder via minibatch SGD
+            # STEP 5: Update decoder via minibatch SGD
             train_loss = self._update_decoder(
                 X_train,
                 decoder_optimizer,
                 self.config.decoder_updates_per_iteration,
                 D_train=D_condition,
-                sample_weights=sample_weights,
             )
             self._training_history["train_loss"].append(train_loss)
-            selection_loss = self._checkpoint_selection_loss(train_loss, X_train, sample_weights)
+            selection_loss = self._checkpoint_selection_loss(train_loss, X_train)
             self._training_history["selection_loss"].append(selection_loss)
 
             if collect_diagnostics:
@@ -2145,12 +1994,11 @@ class BAE(nn.Module):
                     diag_stats,
                     X=X_train,
                     D=D_condition,
-                    sample_weights=sample_weights,
                     targets=targets,
                     prev_W=prev_W,
                 )
 
-            # STEP 7: Check early stopping criteria and store the best model. For
+            # STEP 6: Check early stopping criteria and store the best model. For
             # correlation-constrained fits, selection_loss includes the constraint
             # so restoration cannot quietly select a less-disentangled checkpoint.
             if selection_loss < best_selection_loss:
@@ -2201,7 +2049,6 @@ class BAE(nn.Module):
         if best_decoder_state is not None:
             self.decoder.load_state_dict(best_decoder_state)
         self._batch_weights = best_batch_weights
-        self._balance_obs = balance_obs
 
         self._is_fitted = True
 
@@ -2210,16 +2057,8 @@ class BAE(nn.Module):
 
         # Optional stability selection of the encoder's gene sets. Off by default:
         # it adds a fraction of one fit's cost (see BAE.stability_selection).
-        if stability_selection is True:
-            warnings.warn(
-                "stability_selection=True is deprecated; pass the mode explicitly, "
-                'e.g. stability_selection="subsample".',
-                FutureWarning,
-                stacklevel=2,
-            )
-            stability_selection = "subsample"
         if stability_selection:
-            self.stability_selection(adata, mode=stability_selection, verbose=verbose)
+            self.stability_selection(adata, verbose=verbose)
         return self
 
     @property
@@ -2320,27 +2159,6 @@ class BAE(nn.Module):
             reconstruction, _ = self.forward(X, D)
         return reconstruction.cpu().numpy()
 
-    @staticmethod
-    def _balance_weights(adata: AnnData, balance_obs: str | None) -> np.ndarray | None:
-        """Inverse-frequency per-cell weights giving each level equal total weight."""
-        if balance_obs is None:
-            return None
-        if balance_obs not in adata.obs.columns:
-            raise ValueError(f"Column {balance_obs!r} not found in adata.obs")
-        groups = adata.obs[balance_obs]
-        if groups.isna().any():
-            raise ValueError(f"Column {balance_obs!r} contains missing values")
-        counts = groups.value_counts(sort=False)
-        if len(counts) < 2:
-            raise ValueError(f"Column {balance_obs!r} must contain at least two levels")
-        if len(counts) > 50:
-            raise ValueError(
-                f"Column {balance_obs!r} has {len(counts)} levels; "
-                "balance_obs must identify a discrete batch variable"
-            )
-        weights = {lvl: len(groups) / (len(counts) * c) for lvl, c in counts.items()}
-        return groups.map(weights).to_numpy(dtype=np.float32)
-
     @_isolates_torch_rng()
     def _iteration_support_frequency(
         self,
@@ -2354,7 +2172,7 @@ class BAE(nn.Module):
 
         Continues the alternating optimization from the fitted state, recording the
         encoder support after each boosting step, then **restores the model**, so the
-        call is non-destructive like :meth:`stability_selection` in subsample mode.
+        call is non-destructive.
 
         Why this exists: the encoder support does not converge even when the
         reconstruction loss does. On measured data the loss plateaus at ~95% of the
@@ -2420,13 +2238,6 @@ class BAE(nn.Module):
             D_condition = self._to_tensor(
                 transform_obs_covariates(adata, self._batch_encoding), self.config.device
             )
-        raw_weights = self._balance_weights(adata, self._balance_obs)
-        sample_weights = (
-            torch.from_numpy(raw_weights).to(self.config.device)
-            if raw_weights is not None
-            else None
-        )
-
         # float32, matching `fit`. This path used to promote to float64 on top of
         # the float32 copy above -- three copies of the expression matrix resident
         # at once -- buying a precision difference measured at about one gene in
@@ -2498,17 +2309,11 @@ class BAE(nn.Module):
                     X_train,
                     lr=self.config.target_optim_lr,
                     obs_covariates=D_condition,
-                    sample_weights=sample_weights,
                 )
                 if self.config.disentanglement == "leave_one_out":
                     from ._utils import disentangle_boosting_targets
 
-                    targets = disentangle_boosting_targets(
-                        targets, standardize=self.config.disentanglement_standardize
-                    )
-                if self.config.standardize_targets:
-                    targets = self._standardize_targets(targets)
-
+                    targets = disentangle_boosting_targets(targets)
                 self.encoder.reset_weights()
                 fit_targets, beta_init, fit_mandatory = self._transfer_boosting_inputs(
                     targets, sourcemat_aug.shape[1], prior_dims, allboost_mandatory
@@ -2593,7 +2398,6 @@ class BAE(nn.Module):
                     decoder_optimizer,
                     self.config.decoder_updates_per_iteration,
                     D_train=D_condition,
-                    sample_weights=sample_weights,
                 )
         finally:
             self.encoder.set_weights(saved_encoder)
@@ -2624,239 +2428,113 @@ class BAE(nn.Module):
         self,
         adata: AnnData,
         *,
-        mode: str = "iteration",
         n_runs: int = 300,
-        subsample_frac: float = 0.5,
         threshold: float = 0.7,
         seed: int | None = None,
-        n_subsamples: int | None = None,
-        n_iterations: int | None = None,
         verbose: bool = True,
     ):
         """Stability-select genes for each latent dimension of the fitted model.
 
-        The model is frozen. Its functional-gradient targets ``z*`` are recomputed
-        once, then :func:`~structboost.stability_selection` re-runs the encoder's
-        boosting problem on many subsamples of the cells and records, per latent
-        dimension, how often each gene is selected. This costs a fraction of one
-        fit and needs no refitting — a single converged model is enough.
+        Records how often each gene is selected across ``n_runs`` further training
+        iterations continued from the fitted state, then restores the model, so the
+        call is non-destructive. It answers: *would these genes still be selected if
+        the optimizer had stopped somewhere else on its loss plateau?*
 
-        Targets are ``z*`` rather than the latent codes: the codes are a sparse
-        linear function of the already-selected genes, so selecting them back is
-        nearly circular, whereas ``z*`` carries the decoder's full reconstruction
-        gradient. The resampled problem reuses the model's boosting
-        hyperparameters, mandatory genes, and (if fitted) nuisance regressors,
-        conditioning and balancing, so it matches the selection the encoder solved.
+        That is the variance source that dominates here. The encoder support does
+        not converge even when the reconstruction loss does — on measured data the
+        loss plateaus at ~95% of the achievable linear ceiling while consecutive
+        iterations share only about a third of their selected genes. A single fit
+        reports one arbitrary position on that walk.
 
-        Scope. This measures stability under *cell resampling, conditional on the
-        learned representation*. It does not capture the variability from
-        re-initializing and refitting the autoencoder to a different local optimum,
-        which full refits would. On simulated data the per-gene selection
-        frequencies track a full-refit gold standard closely (correlation ~0.95),
-        so it is a good, far cheaper proxy; but where the model has several
-        competing optima, high-stakes marker claims may still warrant a handful of
-        full refits as a cross-check.
+        On simulated data with exact ground truth this gives the lowest
+        false-discovery rate of the available readouts (0.26, against 0.31 for cell
+        subsampling and 0.38 for a single fit), and its frequencies are empirically
+        well calibrated: genes selected in 90-100% of iterations are markers 88% of
+        the time. It provides **no formal error control** —
+        ``expected_false_positives`` is deliberately ``NaN`` rather than a number
+        that would look like a guarantee, because training iterations are neither
+        independent nor exchangeable.
+
+        Scope. This measures stability *conditional on the learned representation*.
+        It does not capture the variability from re-initializing and refitting the
+        autoencoder to a different local optimum, which full refits would. For
+        high-stakes marker claims, a handful of full refits remains a worthwhile
+        cross-check.
 
         Parameters
         ----------
         adata
             The data the model was fitted on (same genes; obs columns required only
-            if the model used conditioning, nuisance or balancing covariates).
-        mode
-            Which source of instability to measure.
-
-            ``"iteration"`` (default)
-                Selection frequency across ``n_runs`` further training
-                iterations. Answers "would these genes still be selected if the
-                optimizer had stopped somewhere else on its loss plateau?" The two
-                are complementary, not alternatives: they measure different variance
-                sources, and on measured data the second is the larger one, because
-                the encoder support keeps moving long after the loss has converged.
-
-                Costs ``n_runs`` further training steps and needs no refitting or
-                subsampling. It is the default because it is the mode that measures
-                the variance that actually dominates: on measured data the
-                reconstruction loss converges while the encoder support keeps
-                moving. On simulated data with exact ground truth it also gives the
-                lowest false-discovery rate of the three readouts (0.26, against
-                0.31 for subsampling and 0.38 for a single fit), and its
-                frequencies are empirically well calibrated — genes selected in
-                90-100% of iterations are markers 88% of the time.
-
-                Provides **no formal error control**; see
-                :class:`~structboost.StabilitySelectionResult`.
-            ``"subsample"``
-                Meinshausen-Bühlmann cell subsampling with the model frozen. Answers
-                "would these genes still be selected on a different sample of cells?"
-
-                .. warning::
-                   ``expected_false_positives`` reports the Meinshausen-Bühlmann
-                   bound, and on simulated data where the truth is known that bound
-                   is **violated by roughly an order of magnitude** (mean realized
-                   2.57 false positives per dimension against a bound of 0.20;
-                   satisfied in 15 of 60 dimensions). The likely cause is a scope
-                   error rather than an implementation bug: the bound assumes
-                   exchangeable subsamples of an inference problem fixed in advance,
-                   whereas the targets ``z*`` here come from a model fitted on the
-                   same cells being resampled. Treat the number as a diagnostic,
-                   not a guarantee. This mode is retained for investigation.
+            if the model used conditioning or nuisance covariates).
         n_runs
-            How many resampling runs to average over — cell subsamples in subsample
-            mode, further training iterations in iteration mode. One name because it
-            plays the same role in both.
-
-            The default of 300 is set by iteration mode's requirement: the support
-            autocorrelation decays slowly (still ~0.45 at lag 100 on measured data),
-            so short windows give highly correlated, near-duplicate samples.
-            Subsample mode is well served by fewer — 100 was this method's previous
-            default — so pass ``n_runs=100`` there if the threefold cost matters.
-        subsample_frac
-            Subsample mode only. ``0.5`` is the value Meinshausen & Bühlmann (2010)
-            derive the bound for.
+            How many further training iterations to average over. The default of
+            300 is set by the support autocorrelation, which decays slowly (still
+            ~0.45 at lag 100 on measured data), so short windows give highly
+            correlated, near-duplicate samples.
         threshold
-            Selection-frequency cutoff for the stable support, in both modes.
+            Selection-frequency cutoff for the stable support.
         seed
-            Seeds the subsampling RNG (subsample mode) or torch (iteration mode).
-        n_subsamples, n_iterations
-            Deprecated aliases for ``n_runs``, kept so existing calls keep working.
+            Seeds torch for the continued training iterations.
         verbose
-            Show a progress bar. On by default: the iteration mode's ``n_runs``
-            defaults to 300 further training steps, which is a long silence.
+            Show a progress bar. On by default: ``n_runs`` defaults to 300 further
+            training steps, which is a long silence.
 
         Returns
         -------
         StabilitySelectionResult
-            Subsample mode stores ``adata.varm["BAE_selection_frequency"]``;
-            iteration mode stores ``adata.varm["BAE_iteration_frequency"]``. Both
-            are ``(n_genes, latent_dim)``: iteration mode matches each iteration's
-            dimensions to the fitted model's before counting, so a dimension index
-            keeps its meaning — see ``dim_match_quality``, and fall back to
-            ``frequency.max(axis=1)`` when it is low. Both write a summary under
-            ``adata.uns["bae"]["stability_selection"]``, tagged with the mode that
-            produced it.
+            Stores ``adata.varm["BAE_iteration_frequency"]``, shape
+            ``(n_genes, latent_dim)``. Each iteration's dimensions are matched to
+            the fitted model's before counting, so a dimension index keeps its
+            meaning — see ``dim_match_quality``, and fall back to
+            ``frequency.max(axis=1)`` when it is low. A summary is written under
+            ``adata.uns["bae"]["stability_selection"]``.
+
+        See Also
+        --------
+        structboost.stability_selection : The standalone ``allboost``-level
+            function, which resamples cells in the Meinshausen-Buhlmann scheme.
+            Available for supervised boosting problems that have no training loop
+            to iterate over.
         """
         if not self._is_fitted:
             raise RuntimeError("Model not fitted. Call fit() first.")
-        if mode not in {"subsample", "iteration"}:
-            raise ValueError(f"mode must be 'subsample' or 'iteration', got {mode!r}")
-        for old_name, old_value in (("n_subsamples", n_subsamples), ("n_iterations", n_iterations)):
-            if old_value is not None:
-                warnings.warn(
-                    f"{old_name} is deprecated; use n_runs, which names the same "
-                    "quantity in both modes.",
-                    FutureWarning,
-                    stacklevel=2,
-                )
-                n_runs = old_value
         if n_runs < 1:
             raise ValueError(f"n_runs must be >= 1, got {n_runs}")
         if not 0.0 < threshold <= 1.0:
             raise ValueError(f"threshold must be in (0, 1], got {threshold}")
 
-        if mode == "iteration":
-            from ._stability import StabilitySelectionResult
+        from ._stability import StabilitySelectionResult
 
-            frequency, avg_selected, quality, coefficients = self._iteration_support_frequency(
-                adata, n_iterations=n_runs, seed=seed, verbose=verbose
-            )
-            result = StabilitySelectionResult(
-                frequency=frequency,
-                stable_support=frequency >= threshold,
-                threshold=float(threshold),
-                avg_selected=avg_selected,
-                # Training iterations are neither independent nor exchangeable, so
-                # the Meinshausen-Bühlmann bound does not apply. Deliberately NaN
-                # rather than a number that would look like error control.
-                expected_false_positives=np.full(frequency.shape[1], np.nan),
-                n_subsamples=0,
-                subsample_frac=float("nan"),
-                mode="iteration",
-                n_iterations=int(n_runs),
-                dim_match_quality=quality,
-                coefficient_cond_mean=coefficients[0],
-                coefficient_sd=coefficients[1],
-                sign_consistency=coefficients[2],
-            )
-            adata.varm["BAE_iteration_frequency"] = result.frequency
-            uns = adata.uns.setdefault("bae", {})
-            uns["stability_selection"] = {
-                "mode": "iteration",
-                "threshold": result.threshold,
-                "n_iterations": result.n_iterations,
-                "n_stable_per_dim": result.stable_support.sum(axis=0).astype(np.intp),
-                "avg_selected_per_dim": result.avg_selected,
-                "dim_match_quality": quality,
-                "expected_false_positives_per_dim": result.expected_false_positives,
-            }
-            return result
-
-        from ._stability import stability_selection as _run_stability
-        from ._utils import resolve_mandatory_genes, transform_obs_covariates
-
-        matrix = _expression_matrix(adata, self._layer)
-        X_np = matrix.toarray() if sp.issparse(matrix) else np.asarray(matrix)
-        X_np = X_np.astype(np.float32)
-        X_t = torch.from_numpy(X_np).to(self.config.device)
-
-        # Rebuild the same covariate context the encoder was fitted under, so the
-        # resampled selection problem is the one the model actually solved.
-        D_condition = None
-        if self._conditions_decoder:
-            D_condition = self._to_tensor(
-                transform_obs_covariates(adata, self._batch_encoding), self.config.device
-            )
-        weights_np = self._balance_weights(adata, self._balance_obs)
-        weights_t = (
-            torch.from_numpy(weights_np).to(self.config.device) if weights_np is not None else None
+        frequency, avg_selected, quality, coefficients = self._iteration_support_frequency(
+            adata, n_iterations=n_runs, seed=seed, verbose=verbose
         )
-
-        targets = self._compute_boosting_targets(
-            X_t,
-            lr=self.config.target_optim_lr,
-            obs_covariates=D_condition,
-            sample_weights=weights_t,
+        result = StabilitySelectionResult(
+            frequency=frequency,
+            stable_support=frequency >= threshold,
+            threshold=float(threshold),
+            avg_selected=avg_selected,
+            # Training iterations are neither independent nor exchangeable, so
+            # the Meinshausen-Buhlmann bound does not apply. Deliberately NaN
+            # rather than a number that would look like error control.
+            expected_false_positives=np.full(frequency.shape[1], np.nan),
+            n_subsamples=0,
+            subsample_frac=float("nan"),
+            mode="iteration",
+            n_iterations=int(n_runs),
+            dim_match_quality=quality,
+            coefficient_cond_mean=coefficients[0],
+            coefficient_sd=coefficients[1],
+            sign_consistency=coefficients[2],
         )
-
-        # float32, matching `fit`; see _iteration_support_frequency.
-        sourcemat = X_np
-        n_nuisance = 0
-        if self._regresses_encoder:
-            D_nuisance = transform_obs_covariates(adata, self._batch_encoding)
-            sourcemat = np.hstack([sourcemat, np.asarray(D_nuisance, dtype=np.float32)])
-            n_nuisance = self._batch_encoding.n_columns
-
-        resolved_mandatory = resolve_mandatory_genes(self._mandatory_genes, adata)
-        mandatory = _build_allboost_mandatory(resolved_mandatory, n_nuisance, self.n_genes)
-        mandatory_ridge = np.zeros(sourcemat.shape[1], dtype=np.float64)
-        if n_nuisance:
-            mandatory_ridge[self.n_genes :] = self.config.nuisance_ridge
-
-        result = _run_stability(
-            sourcemat,
-            targets,
-            n_genes=self.n_genes,
-            mandatory_features=mandatory,
-            mandatory_ridge=mandatory_ridge,
-            n_subsamples=n_runs,
-            subsample_frac=subsample_frac,
-            threshold=threshold,
-            stepno=self.config.boosting_stepno,
-            nu=self.config.boosting_nu,
-            csf=self.config.boosting_csf,
-            independent=self.config.boosting_independent,
-            seed=seed,
-            verbose=verbose,
-        )
-
-        adata.varm["BAE_selection_frequency"] = result.frequency
+        adata.varm["BAE_iteration_frequency"] = result.frequency
         uns = adata.uns.setdefault("bae", {})
         uns["stability_selection"] = {
-            "mode": "subsample",
+            "mode": "iteration",
             "threshold": result.threshold,
-            "n_subsamples": result.n_subsamples,
-            "subsample_frac": result.subsample_frac,
+            "n_iterations": result.n_iterations,
             "n_stable_per_dim": result.stable_support.sum(axis=0).astype(np.intp),
             "avg_selected_per_dim": result.avg_selected,
+            "dim_match_quality": quality,
             "expected_false_positives_per_dim": result.expected_false_positives,
         }
         return result
@@ -2994,6 +2672,13 @@ class BAE(nn.Module):
         X = self._to_tensor(_expression_matrix(adata, self._layer), self.config.device)
         weights = self.encoder.linear.weight.detach().cpu().numpy().T
         return self._transfer_diagnostics(adata, X, weights)
+
+    #: Columns with a standard deviation below this are treated as constant and
+    #: left unscaled. Testing ``std == 0`` is not enough: a latent dimension
+    #: carrying almost no signal has a tiny but nonzero standard deviation, and
+    #: dividing by it inflates pure numerical noise to unit variance, handing a
+    #: dead dimension the same weight as a real one.
+    _STD_EPS: float = 1e-12
 
     #: obsm key for the per-dimension standardized latent, written only by
     #: transfer models. See ``_refit_latent_scaling``.
@@ -3356,7 +3041,9 @@ class BAE(nn.Module):
         ``variance_explained`` anchors the raw losses, which are otherwise
         unreadable: on the z-transformed input BAE expects, an MSE of 1.0 is what
         predicting zero everywhere scores. Compare it with
-        :func:`~structboost.linear_ceiling` for the achievable maximum.
+        :func:`~structboost.linear_ceiling` for the achievable maximum. It is
+        written by every fit; only ``reconstruction_loss_by_obs`` and
+        ``latent_obs_r2_per_dim`` require a covariate.
         """
         X = self._to_tensor(_expression_matrix(adata, self._layer), self.config.device)
 
@@ -3390,8 +3077,6 @@ class BAE(nn.Module):
             uns_dict["layer"] = self._layer
         if self.config.disentanglement == "correlation":
             uns_dict["disentanglement_lambda"] = self.config.disentanglement_lambda
-        elif self.config.disentanglement == "leave_one_out":
-            uns_dict["disentanglement_standardize"] = self.config.disentanglement_standardize
         if self._training_report is not None:
             uns_dict["training_report"] = self._training_report.to_dict()
         if hasattr(self, "_mandatory_genes") and self._mandatory_genes is not None:
@@ -3406,8 +3091,6 @@ class BAE(nn.Module):
         if self._batch_weights is not None:
             uns_dict["batch_weights"] = self._batch_weights
             uns_dict["nuisance_ridge"] = self.config.nuisance_ridge
-        if self._balance_obs is not None:
-            uns_dict["balance_obs"] = self._balance_obs
         diagnostic_encoding = self._batch_encoding
         if diagnostic_encoding is not None:
             from ._utils import transform_obs_covariates
@@ -3425,19 +3108,21 @@ class BAE(nn.Module):
             )
             uns_dict["latent_obs_r2_per_dim"] = 1.0 - latent_r2
 
+        # Always recorded. A bare MSE is not interpretable on its own: on the
+        # z-transformed input BAE expects, 1.0 is what predicting zero everywhere
+        # scores, so "0.85" reads as a good fit when it means 15% of variance
+        # explained. See `linear_ceiling` for the companion question of how much a
+        # latent_dim-dimensional model could explain. This used to be written only
+        # for covariate fits, which left the documented quality workflow raising
+        # KeyError on a plain `fit(adata)` — the metric has nothing to do with
+        # covariates, and only the per-group breakdown below does.
+        residual, explained = self._reconstruction_stats(adata)
+        uns_dict["variance_explained"] = float(explained)
+
         group_columns = set()
         if self._batch_encoding is not None:
             group_columns.update(self._batch_encoding.obs_columns)
-        if self._balance_obs is not None:
-            group_columns.add(self._balance_obs)
         if group_columns:
-            residual, explained = self._reconstruction_stats(adata)
-            # A bare MSE is not interpretable on its own: on the z-transformed input
-            # BAE expects, 1.0 is what predicting zero everywhere scores, so "0.85"
-            # reads as a good fit when it means 15% of variance explained. Record the
-            # normalized figure next to it. See `linear_ceiling` for the companion
-            # question of how much a latent_dim-dimensional model could explain.
-            uns_dict["variance_explained"] = float(explained)
             kept = sorted(c for c in group_columns if adata.obs[c].nunique() <= _MAX_GROUP_LEVELS)
             skipped = sorted(set(group_columns) - set(kept))
             if skipped:

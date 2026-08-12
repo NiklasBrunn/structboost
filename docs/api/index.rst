@@ -28,10 +28,10 @@ Gene selection and reliability
 ------------------------------
 
 How reproducible is the gene list? :doc:`../guide/tasks/gene-selection` explains
-the two modes and what neither of them gives you.
+what stability selection measures and what it does not give you.
 
 Note that ``stability_selection`` below is the standalone ``allboost``-level
-function, which does subsample mode only and has its own defaults. The method
+function, which resamples cells and has its own defaults. The method
 :meth:`structboost.BAE.stability_selection` is the one you want for a fitted
 model.
 

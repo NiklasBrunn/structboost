@@ -438,14 +438,6 @@ def test_decoder_warmup_without_a_prior_is_rejected():
     ("kwargs", "fit_kwargs", "match"),
     [
         ({"config": _config(latent_dim=6, split_softmax=True)}, {}, "split_softmax"),
-        (
-            {
-                "prior_mode": "anchored",
-                "config": _config(latent_dim=6, standardize_targets=True),
-            },
-            {},
-            "standardize_targets",
-        ),
         ({"config": _transfer_config(2)}, {"init_pca": True}, "init_pca"),
         ({"config": _transfer_config(2)}, {"init_obsm": "X_emb"}, "init_pca"),
     ],
@@ -545,7 +537,7 @@ def test_frozen_prior_reports_no_stability_rather_than_certainty():
     )
     model.fit(work, verbose=False, decoder_warmup_epochs=3)
 
-    result = model.stability_selection(work, mode="iteration", n_runs=8, threshold=0.7)
+    result = model.stability_selection(work, n_runs=8, threshold=0.7)
     assert result.frequency[:, :4].max() == 0.0
     assert result.frequency[:, 4:].max() > 0.0
 
@@ -561,7 +553,7 @@ def test_anchored_prior_reports_movement_off_the_anchor():
     )
     model.fit(work, verbose=False, decoder_warmup_epochs=3)
 
-    result = model.stability_selection(work, mode="iteration", n_runs=8, threshold=0.7)
+    result = model.stability_selection(work, n_runs=8, threshold=0.7)
     assert result.frequency[:, :4].max() > 0.0
 
 
@@ -575,7 +567,7 @@ def test_stability_selection_leaves_a_transfer_model_unchanged():
     model.fit(work, verbose=False, decoder_warmup_epochs=3)
 
     before = model.get_encoder_weights().copy()
-    model.stability_selection(work, mode="iteration", n_runs=5, threshold=0.7)
+    model.stability_selection(work, n_runs=5, threshold=0.7)
     assert np.array_equal(model.get_encoder_weights(), before)
 
 
@@ -768,7 +760,7 @@ def test_apply_encoder_refreshes_the_scaled_latent_and_its_statistics():
     before = work.obsm["X_bae_scaled"].copy()
     before_scale = np.asarray(work.uns["bae_transfer"]["latent_scale"]).copy()
 
-    result = model.stability_selection(work, mode="iteration", n_runs=6, threshold=0.7)
+    result = model.stability_selection(work, n_runs=6, threshold=0.7)
     model.apply_encoder(result.stable_encoder(), work)
 
     assert not np.array_equal(before, work.obsm["X_bae_scaled"])

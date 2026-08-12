@@ -3,6 +3,76 @@
 Releases follow [semantic versioning](https://semver.org). While the project is
 pre-1.0, a minor bump may break API.
 
+### [0.3.0] - 2026-08-11
+
+**Breaking.** Five settings are gone and `BAE.stability_selection` has one mode
+instead of two. Every removed option was off by default, so a fit that took the
+defaults is unaffected: the encoder matrix is bitwise identical across a plain
+fit, a batch-integrated fit, and both disentanglement methods. What changes is the
+surface you have to reason about.
+
+`boosting_nu` stays at `0.1`. Raising it to `0.3` was measured and deferred: at
+the default `stepno=50` it matches `0.1`'s marker recovery three to four times
+faster and wins outright on low-signal data, but then degrades if training
+continues, and the training-MSE stopping rule cannot see it happening. The guide
+records the numbers; the two changes belong together and will land together.
+
+**Checkpoints written by 0.2.0 no longer load.** `restore_payload` splats the
+stored config into `BAEConfig`, so a dropped field is an unexpected keyword
+argument rather than a missing one. The format is bumped to 5 and the loader
+refuses 4 by name. No migration is written: the method is under active
+development and a checkpoint is cheap to regenerate, whereas a compatibility
+shim for options that no longer exist is not.
+
+Removed from `BAEConfig`:
+
+- `decoder_dropout_rate` and `decoder_use_batch_norm`. Batch norm was already
+  documented as harmful (marker-recovery F1 0.59-0.73) because the boosting
+  target is computed with the decoder in eval mode and the update applied in
+  train mode. Dropout has exactly the same inconsistency and it was never written
+  down: the target comes from the full network, the update from a thinned one.
+  With both gone the decoder is a deterministic per-cell function, which is the
+  property `_compute_boosting_targets` has always relied on.
+- `disentanglement_standardize`. Both `disentanglement` methods stay.
+- `standardize_targets`. It was a genuine trade-off — higher selection precision,
+  roughly half the recall — but it is superseded by
+  `stability_selection(threshold=...)` -> `stable_encoder()` -> `apply_encoder()`,
+  which is the same trade with a dial that reports what it is doing. Two knobs for
+  one trade-off is worse than one.
+
+Removed from `fit`:
+
+- `balance_obs`, and with it the `sample_weights` parameter that threaded through
+  nine methods and both stability paths. Its own documentation conceded the
+  limit: the weights never reached the `allboost` fit, so gene selection stayed
+  unbalanced no matter what they were set to. The measured effect was modest (per
+  group reconstruction-MSE spread 0.231 -> 0.150) for a mechanism that promised
+  more than it delivered.
+
+`BAE.stability_selection` is now iteration mode only; `mode`, `subsample_frac`,
+`n_subsamples` and `n_iterations` are gone, and `fit(stability_selection=...)`
+takes a bool. Iteration mode was already the default and measures the lower
+false-discovery rate (0.26 against 0.31). The subsample path stays available as
+the standalone `structboost.stability_selection`, which is where it belongs: it
+resamples cells in the Meinshausen-Buhlmann scheme and works on an `allboost`
+problem, so supervised users with no training loop to iterate over still have it.
+The Meinshausen-Buhlmann bound it reports was measured to be violated by roughly
+an order of magnitude when the targets come from a model fitted on the same
+cells, and that warning moved with it.
+
+`uns["bae"]["variance_explained"]` is now written by every fit. It used to appear
+only when a covariate argument was passed, which left the quality workflow the
+guide documents — compare it against `linear_ceiling` — raising `KeyError` on a
+plain `fit(adata)`. The metric has nothing to do with covariates; only the
+per-group breakdown does, and that stays behind the covariate guard.
+
+Two fixes found along the way: the `allboost` example in the guide passed
+`mode="standard"`, an argument `allboost` has never accepted, so it raised
+`TypeError` as written. And `disentangle_boosting_targets` projects through the
+origin, with no intercept — exact residualization only on centered targets. That
+was masked by `disentanglement_standardize`, which centered them; with the flag
+gone the assumption is documented instead.
+
 ### [0.2.0] - 2026-08-05
 
 The boosting loop got faster without changing what it computes. Measured

@@ -21,12 +21,6 @@ An MSE of 0.85 reads like "nearly perfect" and is nothing of the kind. Use
 adata.uns["bae"]["variance_explained"]
 ```
 
-:::{note}
-That key is only written when a covariate argument (`batch_key` or
-`balance_obs`) was used. For a plain fit, compare against the
-ceiling below instead.
-:::
-
 ## The achievable ceiling
 
 Even 100% is the wrong target. Most per-gene variance in scRNA-seq is dropout and

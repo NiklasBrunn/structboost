@@ -5,7 +5,7 @@ Name the covariate once. The mode decides which of the two mechanisms act on it.
 ```python
 model.fit(adata, batch_key="batch")                              # both, the default
 model.fit(adata, batch_key="batch", batch_integration_mode="decoder")
-model.fit(adata, batch_key=["batch", "donor"], balance_obs="batch")
+model.fit(adata, batch_key=["batch", "donor"])                    # several columns
 ```
 
 No `batch_key` means no integration. Naming a mode without a `batch_key` raises,
@@ -91,30 +91,6 @@ It is relative to each encoded column's squared norm, and mandatory *gene*
 coefficients stay unpenalized. It is never applied automatically, because ridge
 changes the estimates and doing so silently would fit a different model than the
 one asked for.
-
-## `balance_obs` is a different thing
-
-Inverse-frequency per-cell weights, so a large group cannot dominate. It is a
-fairness knob, not an integration one, and it is passed separately.
-
-:::{warning}
-**The weights do not reach gene selection.** They enter the boosting-target
-gradient, the decoder update, the reported losses and the diagnostics. They do
-**not** enter the `allboost` fit itself, which remains ordinary unweighted least
-squares.
-
-So the targets the encoder chases are balanced, but the projection of those
-targets onto genes is not, and **gene selection still leans toward the larger
-group**.
-:::
-
-Measured on a deliberately imbalanced 500/90/45 design: the spread in per-group
-reconstruction MSE fell from 0.231 to 0.150. Check whether it helped on your
-data, and check first whether group size actually predicts fit quality, since
-uneven per-group reconstruction has causes other than imbalance.
-
-The column must be discrete: at most 50 levels, no missing values, at least two
-levels.
 
 ## Did it work?
 

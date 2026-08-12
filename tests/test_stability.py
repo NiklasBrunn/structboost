@@ -150,25 +150,6 @@ def _require_bae():
     pytest.importorskip("anndata")
 
 
-def test_bae_method_stores_and_returns():
-    _require_bae()
-    from structboost import BAE, BAEConfig, sim_scrnaseq_anndata
-
-    a = sim_scrnaseq_anndata(n=400, n_genes=150, stageno=4, stagep=12, seed=1)
-    m = BAE(
-        a.n_vars, BAEConfig(latent_dim=4, max_iterations=30, enable_early_stopping=False, seed=0)
-    )
-    m.fit(a, verbose=False)
-
-    res = m.stability_selection(a, mode="subsample", n_runs=20, seed=0)
-    assert res.frequency.shape == (a.n_vars, 4)
-    assert a.varm["BAE_selection_frequency"].shape == (a.n_vars, 4)
-    ss = a.uns["bae"]["stability_selection"]
-    assert ss["threshold"] == 0.7
-    assert ss["n_subsamples"] == 20
-    assert ss["n_stable_per_dim"].shape == (4,)
-
-
 def test_bae_stability_requires_fit():
     _require_bae()
     from structboost import BAE, sim_scrnaseq_anndata
@@ -185,8 +166,8 @@ def test_bae_fit_flag_runs_stability_selection():
     a = sim_scrnaseq_anndata(n=300, n_genes=120, stageno=4, stagep=10, seed=2)
     BAE(
         a.n_vars, BAEConfig(latent_dim=4, max_iterations=20, enable_early_stopping=False, seed=0)
-    ).fit(a, verbose=False, stability_selection="subsample")
-    assert "BAE_selection_frequency" in a.varm
+    ).fit(a, verbose=False, stability_selection=True)
+    assert "BAE_iteration_frequency" in a.varm
     assert "stability_selection" in a.uns["bae"]
 
 
@@ -194,9 +175,20 @@ def test_bae_stability_uses_gradient_targets_not_latent():
     """Regressing onto the latent z is nearly circular; the method must use z*.
 
     z = W_sparse @ x is a function of only the selected genes, so re-selecting it
-    is trivial. We check the method does not simply reproduce a fit against the
-    stored latent by confirming stable genes track true markers rather than being
-    a degenerate 0/1 copy of the encoder support.
+    is trivial. The check is that the stable support tracks *true markers* and is
+    not a degenerate copy of the encoder support: it must beat both chance and the
+    single fit it was derived from.
+
+    Measured on this fixture at the shipped defaults: chance precision 0.337 (101
+    markers of 300 genes), and precision 1.000 for both the single fit and the
+    stable support across three fit seeds. The stable support is the smaller set
+    (34-48 genes against 76-82), so the wrapper is tightening a support that was
+    already clean rather than repairing a dirty one.
+
+    The assertion is therefore "no worse than the single fit, and far above
+    chance" rather than a strict improvement: at precision 1.000 there is no
+    headroom to improve into, and demanding one would make the test fail on its
+    own best case.
     """
     _require_bae()
     from structboost import BAE, BAEConfig, sim_scrnaseq_anndata
@@ -216,10 +208,15 @@ def test_bae_stability_uses_gradient_targets_not_latent():
         a.n_vars, BAEConfig(latent_dim=5, max_iterations=80, enable_early_stopping=False, seed=0)
     )
     m.fit(a, verbose=False)
-    res = m.stability_selection(a, mode="subsample", n_runs=40, seed=0)
+    single = np.abs(a.varm["BAE_encoder_weights"]).sum(axis=1) > 0
+    single_precision = (single & truth).sum() / max(single.sum(), 1)
+
+    res = m.stability_selection(a, n_runs=40, seed=0)
     stable = res.stable_support.any(axis=1)
     precision = (stable & truth).sum() / max(stable.sum(), 1)
-    assert precision >= 0.9
+
+    assert precision >= 0.8, f"{precision:.3f} is not far above chance ({truth.mean():.3f})"
+    assert precision >= single_precision, f"stable {precision:.3f} < single {single_precision:.3f}"
 
 
 def test_mandatory_genes_excluded_from_error_bound():
@@ -243,12 +240,13 @@ def test_mandatory_genes_excluded_from_error_bound():
 
 
 def test_gradient_targets_are_per_cell_deterministic():
-    """The precompute-then-subsample shortcut is valid only if z*_i depends on
-    cell i alone. It does, because _compute_boosting_targets runs the decoder in
-    eval mode — even with batch norm enabled, which would otherwise couple cells.
+    """z*_i must depend on cell i alone: no cell may influence another's target.
 
-    This pins the property the BAE stability-selection method relies on: computing
-    z* once on the full data and subsampling it equals recomputing per subsample.
+    The decoder is a deterministic per-cell function and is run in eval mode, so
+    this holds trivially today. It is pinned anyway, because it is the property a
+    stateful decoder layer would silently break — batch norm used to be reachable
+    here and coupled cells through batch statistics whenever the decoder was left
+    in train mode. Anything reintroducing per-batch state must fail this.
     """
     _require_bae()
     import torch
@@ -256,23 +254,21 @@ def test_gradient_targets_are_per_cell_deterministic():
     from structboost import BAE, BAEConfig, sim_scrnaseq_anndata
 
     a = sim_scrnaseq_anndata(n=400, n_genes=100, stageno=4, stagep=10, seed=1)
-    for batch_norm in (False, True):
-        m = BAE(
-            a.n_vars,
-            BAEConfig(
-                latent_dim=4,
-                decoder_hidden_dims=(32,),
-                decoder_use_batch_norm=batch_norm,
-                max_iterations=25,
-                enable_early_stopping=False,
-                seed=0,
-            ),
-        ).fit(a, verbose=False)
-        X = np.asarray(a.X, dtype=np.float32)
-        full = m._compute_boosting_targets(torch.from_numpy(X), lr=1.0)
-        idx = np.array([0, 7, 40, 200, 399])
-        sub = m._compute_boosting_targets(torch.from_numpy(X[idx]), lr=1.0)
-        np.testing.assert_allclose(full[idx], sub, atol=1e-4, err_msg=f"batch_norm={batch_norm}")
+    m = BAE(
+        a.n_vars,
+        BAEConfig(
+            latent_dim=4,
+            decoder_hidden_dims=(32,),
+            max_iterations=25,
+            enable_early_stopping=False,
+            seed=0,
+        ),
+    ).fit(a, verbose=False)
+    X = np.asarray(a.X, dtype=np.float32)
+    full = m._compute_boosting_targets(torch.from_numpy(X), lr=1.0)
+    idx = np.array([0, 7, 40, 200, 399])
+    sub = m._compute_boosting_targets(torch.from_numpy(X[idx]), lr=1.0)
+    np.testing.assert_allclose(full[idx], sub, atol=1e-4)
 
 
 # --- Iteration-mode stability selection -------------------------------------
@@ -309,7 +305,7 @@ def test_iteration_mode_returns_per_dimension_frequency():
     adata = _tiny_adata()
     model = _fitted_model(adata)
 
-    res = model.stability_selection(adata, mode="iteration", n_runs=5, seed=0)
+    res = model.stability_selection(adata, n_runs=5, seed=0)
 
     assert res.mode == "iteration"
     assert res.n_iterations == 5
@@ -325,22 +321,8 @@ def test_iteration_mode_returns_per_dimension_frequency():
     assert adata.uns["bae"]["stability_selection"]["mode"] == "iteration"
 
 
-def test_subsample_mode_unchanged_and_tagged():
-    pytest.importorskip("torch")
-    adata = _tiny_adata()
-    model = _fitted_model(adata)
-
-    res = model.stability_selection(adata, mode="subsample", n_runs=4, seed=0)
-
-    assert res.mode == "subsample"
-    assert res.n_runs == 4
-    assert res.n_iterations == 0
-    assert res.frequency.shape == (adata.n_vars, model.config.latent_dim)
-    assert adata.uns["bae"]["stability_selection"]["mode"] == "subsample"
-
-
 def test_iteration_mode_does_not_mutate_the_fitted_model():
-    """The call must be non-destructive, like subsample mode."""
+    """The call must leave the fitted model exactly as it found it."""
     pytest.importorskip("torch")
     adata = _tiny_adata()
     model = _fitted_model(adata)
@@ -348,7 +330,7 @@ def test_iteration_mode_does_not_mutate_the_fitted_model():
     before_encoder = model.get_encoder_weights().copy()
     before_decoder = {k: v.detach().clone() for k, v in model.decoder.state_dict().items()}
 
-    model.stability_selection(adata, mode="iteration", n_runs=4, seed=0)
+    model.stability_selection(adata, n_runs=4, seed=0)
 
     np.testing.assert_array_equal(model.get_encoder_weights(), before_encoder)
     for key, value in model.decoder.state_dict().items():
@@ -417,25 +399,10 @@ def test_iteration_mode_rejects_bad_arguments():
     adata = _tiny_adata()
     model = _fitted_model(adata)
 
-    with pytest.raises(ValueError, match="mode must be"):
-        model.stability_selection(adata, mode="bogus")
     with pytest.raises(ValueError, match="n_runs must be >= 1"):
-        model.stability_selection(adata, mode="iteration", n_runs=0)
-
-
-def test_deprecated_count_aliases_still_work():
-    """`n_subsamples` / `n_iterations` keep working but warn."""
-    pytest.importorskip("torch")
-    adata = _tiny_adata()
-    model = _fitted_model(adata)
-
-    with pytest.warns(FutureWarning, match="n_subsamples is deprecated"):
-        res = model.stability_selection(adata, n_subsamples=3, seed=0)
-    assert res.n_runs == 3
-
-    with pytest.warns(FutureWarning, match="n_iterations is deprecated"):
-        res = model.stability_selection(adata, mode="iteration", n_iterations=3, seed=0)
-    assert res.n_runs == 3
+        model.stability_selection(adata, n_runs=0)
+    with pytest.raises(ValueError, match="threshold must be in"):
+        model.stability_selection(adata, threshold=0.0)
 
 
 def test_iteration_dimensions_are_matched_to_the_fitted_model():
@@ -448,14 +415,14 @@ def test_iteration_dimensions_are_matched_to_the_fitted_model():
     adata = _tiny_adata()
     model = _fitted_model(adata)
 
-    baseline = model.stability_selection(adata, mode="iteration", n_runs=3, seed=0)
+    baseline = model.stability_selection(adata, n_runs=3, seed=0)
 
     # Permute the fitted encoder's rows. Matching should undo it, so the per-gene
     # frequency matrix should come back permuted the same way, not scrambled.
     perm = torch.tensor([2, 0, 1])
     with torch.no_grad():
         model.encoder.linear.weight.copy_(model.encoder.linear.weight[perm].clone())
-    permuted = model.stability_selection(adata, mode="iteration", n_runs=3, seed=0)
+    permuted = model.stability_selection(adata, n_runs=3, seed=0)
 
     assert permuted.frequency.shape == baseline.frequency.shape
     # Column sums are permutation-equivariant; the multiset of per-dimension
@@ -467,8 +434,8 @@ def test_iteration_dimensions_are_matched_to_the_fitted_model():
     )
 
 
-def test_fit_stability_selection_takes_a_mode_string():
-    """One argument, so "disabled but with a mode" cannot be expressed."""
+def test_fit_stability_selection_is_a_flag():
+    """A bool: the method has one mode, so there is nothing to name."""
     pytest.importorskip("torch")
     from structboost import BAE, BAEConfig
 
@@ -483,72 +450,24 @@ def test_fit_stability_selection_takes_a_mode_string():
     )
 
     model = BAE(n_genes=adata.n_vars, config=BAEConfig(**cfg))
-    model.fit(adata, verbose=False, stability_selection="iteration")
+    model.fit(adata, verbose=False, stability_selection=True)
     assert adata.uns["bae"]["stability_selection"]["mode"] == "iteration"
 
     other = _tiny_adata()
     model = BAE(n_genes=other.n_vars, config=BAEConfig(**cfg))
-    model.fit(other, verbose=False, stability_selection=None)
+    model.fit(other, verbose=False, stability_selection=False)
     assert "stability_selection" not in other.uns.get("bae", {})
-
-
-def test_fit_stability_selection_true_is_deprecated():
-    pytest.importorskip("torch")
-    from structboost import BAE, BAEConfig
-
-    adata = _tiny_adata()
-    model = BAE(
-        n_genes=adata.n_vars,
-        config=BAEConfig(
-            latent_dim=3,
-            boosting_stepno=4,
-            max_iterations=2,
-            enable_early_stopping=False,
-            decoder_updates_per_iteration=2,
-            seed=0,
-        ),
-    )
-    with pytest.warns(FutureWarning, match="stability_selection=True is deprecated"):
-        model.fit(adata, verbose=False, stability_selection=True)
-    assert adata.uns["bae"]["stability_selection"]["mode"] == "subsample"
-
-
-def test_fit_rejects_unknown_stability_mode():
-    pytest.importorskip("torch")
-    from structboost import BAE, BAEConfig
-
-    adata = _tiny_adata()
-    model = BAE(n_genes=adata.n_vars, config=BAEConfig(latent_dim=2, max_iterations=1))
-    with pytest.raises(ValueError, match="stability_selection must be"):
-        model.fit(adata, verbose=False, stability_selection="bogus")
-
-
-def test_default_mode_is_iteration():
-    """The default readout is the one with the lowest measured FDR.
-
-    Changed in 0.7.0.0: subsample mode's Meinshausen-Bühlmann bound is violated by
-    roughly an order of magnitude on data where the truth is known, while iteration
-    frequencies are empirically calibrated. Pinned so the default cannot drift back
-    without the evidence being revisited.
-    """
-    pytest.importorskip("torch")
-    adata = _tiny_adata()
-    model = _fitted_model(adata)
-
-    res = model.stability_selection(adata, n_runs=3, seed=0)
-    assert res.mode == "iteration"
 
 
 # --- Coefficient aggregation and the derived encoder ------------------------
 
 
-@pytest.mark.parametrize("mode", ["iteration", "subsample"])
-def test_coefficients_are_collected_in_both_modes(mode):
+def test_coefficients_are_collected():
     pytest.importorskip("torch")
     adata = _tiny_adata()
     model = _fitted_model(adata)
 
-    res = model.stability_selection(adata, mode=mode, n_runs=6, seed=0)
+    res = model.stability_selection(adata, n_runs=6, seed=0)
 
     shape = (adata.n_vars, model.config.latent_dim)
     assert res.coefficient_cond_mean.shape == shape
@@ -657,11 +576,10 @@ def test_aggregation_works_with_mandatory_genes():
     )
     model.fit(adata, verbose=False, mandatory_genes=mandatory)
 
-    for mode in ("iteration", "subsample"):
-        res = model.stability_selection(adata, mode=mode, n_runs=6, seed=0)
-        encoder = res.stable_encoder()
-        idx = [list(adata.var_names).index(g) for g in mandatory]
-        assert (encoder[idx] != 0).any(axis=1).all(), f"{mode}: mandatory gene dropped"
+    res = model.stability_selection(adata, n_runs=6, seed=0)
+    encoder = res.stable_encoder()
+    idx = [list(adata.var_names).index(g) for g in mandatory]
+    assert (encoder[idx] != 0).any(axis=1).all(), "mandatory gene dropped"
 
 
 def test_masking_can_break_batch_integration_and_warns():
@@ -715,9 +633,8 @@ def test_masking_can_break_batch_integration_and_warns():
 # --- Progress reporting ------------------------------------------------------
 
 
-@pytest.mark.parametrize("mode", ["iteration", "subsample"])
-def test_stability_selection_reports_progress(capsys, mode):
-    """Both modes show a bar by default; `verbose=False` is silent.
+def test_stability_selection_reports_progress(capsys):
+    """A bar by default; `verbose=False` is silent.
 
     The default is 300 runs, so a silent call looks indistinguishable from a hang.
     """
@@ -727,10 +644,10 @@ def test_stability_selection_reports_progress(capsys, mode):
     adata = _tiny_adata()
     model = _fitted_model(adata)
 
-    model.stability_selection(adata, mode=mode, n_runs=2, seed=0, verbose=False)
+    model.stability_selection(adata, n_runs=2, seed=0, verbose=False)
     assert capsys.readouterr().err == ""
 
-    model.stability_selection(adata, mode=mode, n_runs=2, seed=0)
+    model.stability_selection(adata, n_runs=2, seed=0)
     assert "Stability selection" in capsys.readouterr().err
 
 

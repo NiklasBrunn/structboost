@@ -130,8 +130,6 @@ def resolve_precompute_covcache(setting: bool | str, n_features: int) -> bool:
 
 def disentangle_boosting_targets(
     targets: NDArray[np.floating],
-    *,
-    standardize: bool = False,
 ) -> NDArray[np.floating]:
     """Orthogonalize gradient vectors across latent dimensions.
 
@@ -140,15 +138,21 @@ def disentangle_boosting_targets(
     This encourages the subsequent boosting step to learn encoder weights
     that produce disentangled latent representations.
 
+    The regression carries **no intercept**: columns are projected through the
+    origin, not about their means. On centered targets that is the textbook
+    residualization — in two dimensions it flips the correlation's sign and
+    preserves its magnitude exactly. On targets with a substantial common offset
+    it is not: a shared mean dominates the projection, and measured on a synthetic
+    pair a shift of +5 turned a correlation of +0.64 into -0.999 rather than the
+    -0.64 the centered case gives. BAE's targets ``z*`` are near-centered because
+    ``z = X @ W`` on z-scored ``X`` is, so this is ordinarily a non-issue; it is
+    documented because nothing enforces it.
+
     Parameters
     ----------
     targets
         Boosting target matrix of shape (n_samples, latent_dim).
         Each column is the negative gradient for one latent dimension.
-    standardize
-        If True, standardize each column to zero mean and unit variance before
-        orthogonalization. This gives all dimensions equal influence regardless
-        of gradient magnitude. Default is False (preserve original scales).
 
     Returns
     -------
@@ -159,12 +163,6 @@ def disentangle_boosting_targets(
         return targets.copy()
 
     work = targets
-    if standardize:
-        means = targets.mean(axis=0, keepdims=True)
-        stds = targets.std(axis=0, keepdims=True)
-        stds = np.where(stds < 1e-12, 1.0, stds)  # Avoid division by zero
-        work = (targets - means) / stds
-
     result = np.empty_like(work)
     for j in range(n_dims):
         other_cols = np.delete(work, j, axis=1)

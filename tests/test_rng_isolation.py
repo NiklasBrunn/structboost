@@ -122,7 +122,7 @@ def test_seeded_stability_selection_is_isolated():
 
     torch.manual_seed(99)
     before = torch.get_rng_state().clone()
-    model.stability_selection(adata, mode="iteration", n_runs=2, seed=0, verbose=False)
+    model.stability_selection(adata, n_runs=2, seed=0, verbose=False)
 
     assert torch.equal(before, torch.get_rng_state())
 

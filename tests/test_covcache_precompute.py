@@ -243,7 +243,7 @@ class TestStabilityPathsMatchFit:
 
         model_module.allboost = probe
         try:
-            model.stability_selection(adata, mode="iteration", n_runs=2, seed=0, verbose=False)
+            model.stability_selection(adata, n_runs=2, seed=0, verbose=False)
         finally:
             model_module.allboost = original
         assert seen["source"] == np.float32

@@ -52,16 +52,6 @@ class BAEConfig:
         Activation function for decoder hidden layers. ``"tanh"`` (default) is the
         most stable; ``"elu"`` matched it; ``"relu"`` was unstable at larger widths
         (marker-recovery F1 collapsing to 0.80 at 256 units).
-    decoder_dropout_rate
-        Dropout rate for decoder (0.0 = no dropout). Benchmarks showed no benefit;
-        the default is 0.0.
-    decoder_use_batch_norm
-        Whether to use batch normalization in the decoder. Default False, and
-        changing it is not recommended: batch norm *lowers* reconstruction MSE but
-        badly degrades marker recovery (F1 0.59–0.73 in benchmarks). BAE computes
-        the boosting target with the decoder in eval mode (running statistics) and
-        then updates it in train mode (batch statistics), so batch norm makes the
-        target inconsistent with the decoder that produced it.
     split_softmax
         If True, apply split-softmax transformation between encoder and decoder.
         Each latent dimension z_i is paired with −z_i (interleaved) and softmax-
@@ -145,25 +135,6 @@ class BAEConfig:
         a conservative starting point from simulations; it is not universally
         optimal. A useful tuning grid is ``0, 1e-5, 3e-5, 1e-4, 3e-4, 1e-3``.
         Only used when ``disentanglement="correlation"``.
-    disentanglement_standardize
-        If True with ``disentanglement="leave_one_out"``, standardize each target
-        column before residualization. This is unavailable for the correlation
-        method, whose loss already operates on standardized correlations.
-    standardize_targets
-        If True, standardize boosting targets (zero mean, unit variance per column)
-        before passing to allboost. Default is False.
-
-        This is a modelling choice, not a numerical convenience. For a fixed
-        decoder it does not change which genes `allboost` selects — rescaling a
-        target column by c scales the selection criterion by c², leaving every
-        argmax untouched and the coefficients scaled by exactly c — but it does
-        change the encoder magnitude, and therefore every later decoder update and
-        every later target. It equalises the target variance of strong and weak
-        latent dimensions, which constrains the latent scale and can stabilise
-        split-softmax, at the cost of promoting near-empty dimensions and
-        discarding the scale of an ``init_pca`` or ``init_obsm`` warm start. On
-        simulated data with planted gene programs it raises selection precision
-        but roughly halves recall relative to the default.
     target_optim_lr
         Step size for computing boosting targets via gradient descent on z.
         Targets are computed as z* = z - lr * ∂L_target/∂z (single gradient step),
@@ -172,6 +143,13 @@ class BAEConfig:
         decoder update and every reported loss — makes a cell's target step
         independent of how many cells the dataset contains, so a given
         ``target_optim_lr`` means the same thing at every dataset size.
+
+        **Leave this at 1.0.** It is exposed because it is a real coefficient of
+        the method, not because it is a tuning knob: it scales the whole coupling
+        between the two optimizers, and the quantity it scales has no natural
+        unit — ``∂L/∂z`` tracks the decoder's magnitude, which grows by orders of
+        magnitude over a fit. A value that suits one training stage will not suit
+        the next, so the alternation is what adapts, and this stays fixed.
 
         .. note::
            An earlier formulation took the target gradient from the elementwise
@@ -219,8 +197,6 @@ class BAEConfig:
     # Decoder MLP
     decoder_hidden_dims: tuple[int, ...] = (64,)
     decoder_activation: Literal["tanh", "relu", "leaky_relu", "elu"] = "tanh"
-    decoder_dropout_rate: float = 0.0
-    decoder_use_batch_norm: bool = False
     split_softmax: bool = False
     # Boosting parameters
     boosting_stepno: int = 50
@@ -232,8 +208,6 @@ class BAEConfig:
     prior_mode: Literal["frozen", "anchored"] = "frozen"
     disentanglement: Literal["none", "correlation", "leave_one_out"] = "none"
     disentanglement_lambda: float = 1e-4
-    disentanglement_standardize: bool = False
-    standardize_targets: bool = False
     # Target computation
     target_optim_lr: float = 1.0
     # Training parameters
@@ -254,8 +228,6 @@ class BAEConfig:
         """Validate configuration."""
         if self.latent_dim < 1:
             raise ValueError("latent_dim must be >= 1")
-        if not 0.0 <= self.decoder_dropout_rate < 1.0:
-            raise ValueError("decoder_dropout_rate must be in [0.0, 1.0)")
         if self.boosting_stepno < 1:
             raise ValueError("boosting_stepno must be >= 1")
         if not np.isfinite(self.nuisance_ridge) or self.nuisance_ridge < 0:
@@ -275,10 +247,6 @@ class BAEConfig:
             )
         if not np.isfinite(self.disentanglement_lambda) or self.disentanglement_lambda < 0:
             raise ValueError("disentanglement_lambda must be finite and >= 0")
-        if self.disentanglement_standardize and self.disentanglement != "leave_one_out":
-            raise ValueError(
-                "disentanglement_standardize is only available with disentanglement='leave_one_out'"
-            )
         if self.decoder_weight_decay < 0:
             raise ValueError("decoder_weight_decay must be >= 0")
         if self.max_iterations < 1:

@@ -15,7 +15,7 @@ def _require_deps():
     pytest.importorskip("anndata")
 
 
-def _fit(diagnostics, *, n_iter=15, dropout=0.0, seed=0, **cfg_kwargs):
+def _fit(diagnostics, *, n_iter=15, seed=0, **cfg_kwargs):
     from structboost import BAE, sim_scrnaseq_anndata
 
     adata = sim_scrnaseq_anndata(
@@ -26,7 +26,6 @@ def _fit(diagnostics, *, n_iter=15, dropout=0.0, seed=0, **cfg_kwargs):
         boosting_stepno=20,
         max_iterations=n_iter,
         enable_early_stopping=False,
-        decoder_dropout_rate=dropout,
         seed=seed,
         **cfg_kwargs,
     )
@@ -52,13 +51,6 @@ class TestDiagnosticsAreReadOnly:
         m_off, _ = _fit(False)
         m_on, _ = _fit(True)
         assert m_off.training_history["train_loss"] == m_on.training_history["train_loss"]
-
-    def test_identical_with_decoder_dropout(self):
-        """Diagnostics run the decoder in eval mode, so they consume no RNG."""
-        _require_deps()
-        m_off, _ = _fit(False, dropout=0.25)
-        m_on, _ = _fit(True, dropout=0.25)
-        np.testing.assert_array_equal(m_off.get_encoder_weights(), m_on.get_encoder_weights())
 
 
 class TestProgressBar:

@@ -222,19 +222,6 @@ def test_split_softmax_model_round_trips(tmp_path):
     np.testing.assert_array_equal(loaded.reconstruct(adata), reconstruction)
 
 
-def test_batch_norm_decoder_buffers_round_trip(tmp_path):
-    _require_deps()
-    from structboost import BAE
-
-    adata = _adata()
-    model, _ = _fit(adata=adata, config=_config(decoder_use_batch_norm=True))
-    reconstruction = model.reconstruct(adata)
-
-    loaded = BAE.load(model.save(tmp_path / "model.pt"))
-
-    np.testing.assert_array_equal(loaded.reconstruct(adata), reconstruction)
-
-
 def test_per_dimension_mandatory_genes_round_trip(tmp_path):
     _require_deps()
     from structboost import BAE

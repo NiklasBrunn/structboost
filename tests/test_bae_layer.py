@@ -179,7 +179,7 @@ def test_downstream_methods_follow_the_fit_time_layer():
     model.fit(a, layer="scaled", batch_key="batch", batch_integration_mode="decoder", verbose=False)
 
     # Would raise or silently use X if `self._layer` were not threaded through.
-    model.stability_selection(a, mode="iteration", n_runs=2, seed=0, verbose=False)
+    model.stability_selection(a, n_runs=2, seed=0, verbose=False)
     assert "BAE_iteration_frequency" in a.varm
 
     del a.X  # nothing below may fall back to it

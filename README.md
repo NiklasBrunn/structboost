@@ -78,7 +78,7 @@ is not identifiable: many different sparse gene sets reconstruct the data about
 equally well, and a fit returns one of them.
 
 ```python
-res = model.stability_selection(adata, mode="iteration")
+res = model.stability_selection(adata)
 genes = [adata.var_names[res.stable_support[:, j]] for j in range(res.frequency.shape[1])]
 ```
 

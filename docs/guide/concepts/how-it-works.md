@@ -14,24 +14,23 @@ applied afterwards.
 
 ## The training loop
 
-Each iteration runs these six steps, in this order:
+Each iteration runs these five steps, in this order:
 
 1. **Compute boosting targets.** Take one gradient step on the latent code
    itself: `z* = z - lr * ∂L/∂z`. This is functional gradient descent. `z*` is
    where the latent code *should* move to reduce reconstruction error.
 2. *(Optional)* residualize the targets against each other
    (`disentanglement="leave_one_out"`).
-3. *(Optional)* standardize the target columns (`standardize_targets`).
-4. **Reset the encoder weights to zero.**
-5. **Fit the encoder with {func}`~structboost.allboost`**, regressing `X` onto
+3. **Reset the encoder weights to zero.**
+4. **Fit the encoder with {func}`~structboost.allboost`**, regressing `X` onto
    `z*`. This is the step that selects genes.
-6. **Update the decoder** with several minibatch AdamW steps.
+5. **Update the decoder** with several minibatch AdamW steps.
 
 Then check early stopping, and repeat.
 
 ### Why the encoder is reset every iteration
 
-Step 4 looks wasteful and is load-bearing. Boosting's sparsity guarantee comes
+Step 3 looks wasteful and is load-bearing. Boosting's sparsity guarantee comes
 from starting at zero and taking `boosting_stepno` steps: at most that many
 distinct genes can enter. Carrying weights over from the previous iteration would
 let the support accumulate without bound, and after a few hundred iterations the
