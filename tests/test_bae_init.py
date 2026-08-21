@@ -142,8 +142,16 @@ class TestWarmStart:
 
     def test_warm_start_lowers_the_initial_loss(self):
         _require_deps()
-        zero, _ = _fit(n_iter=8, cfg_kwargs={"diagnostics": True})
-        warm, _ = _fit(n_iter=8, cfg_kwargs={"diagnostics": True}, init_pca=True)
+        # `batch_size` sets how many decoder steps an iteration takes -- one pass,
+        # so ceil(300 / 8) = 38 here. The benefit is conditional on the decoder
+        # having enough steps in iteration 0 to adapt to the supplied latent, and
+        # below that it reverses: measured on this data the warm start's first
+        # loss is 1.083 vs 1.023 at one step per iteration, 1.008 vs 1.007 at ten,
+        # and 0.920 vs 1.000 at thirty-eight. A warm start the decoder cannot
+        # follow is worse than no warm start at all.
+        cfg = {"diagnostics": True, "batch_size": 8}
+        zero, _ = _fit(n_iter=8, cfg_kwargs=cfg)
+        warm, _ = _fit(n_iter=8, cfg_kwargs=cfg, init_pca=True)
         assert warm.training_report.loss_post_decoder[0] < zero.training_report.loss_post_decoder[0]
 
     def test_applied_once_only(self):

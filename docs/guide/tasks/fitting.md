@@ -116,24 +116,58 @@ guards. Set `False` explicitly on a memory-constrained machine.
 
 ### Disentanglement
 
-Latent dimensions can end up redundant. `disentanglement="correlation"` adds a
-soft squared-correlation penalty to the target objective, plus a variance barrier
-so that low correlation cannot be achieved by collapsing dimensions. Unlike a
-covariance penalty, it cannot be reduced merely by shrinking every dimension and
-letting the decoder compensate with larger weights:
+:::{admonition} Exploratory
+:class: caution
+Under active development. Both methods are provisional, and the measurements
+below come from three datasets at three seeds each.
+:::
+
+Latent dimensions can end up redundant. **Since 0.5.0 the default is
+`disentanglement="orthogonal"`**, which replaces the boosting targets with the
+nearest mutually orthogonal set of the same column norms — symmetric Löwdin
+orthogonalization, computed from the thin SVD as `U @ Vt`.
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `disentanglement` | `"orthogonal"` | `"none"` and `"correlation"` also available. |
+| `disentanglement_alpha` | `1.0` | Strength of the orthogonality constraint, in `[0, 1]`. |
+| `disentanglement_lambda` | `1e-2` | Correlation-penalty strength; **larger decorrelates more**. |
+
+**Softening it.** `disentanglement_alpha` interpolates:
+`(1 - alpha) * targets + alpha * orthogonalized`. At `1.0` the targets are exactly
+orthogonal, at `0.0` untouched — so **decorrelation can be softened by choosing an
+alpha strictly between 0 and 1**. The response is monotone and the scale is
+bounded, so no calibration sweep is needed to find a usable range.
 
 ```python
-BAEConfig(latent_dim=10, disentanglement="correlation", disentanglement_lambda=1e-4)
+BAEConfig(latent_dim=10, disentanglement_alpha=0.5)   # half-strength
+BAEConfig(latent_dim=10, disentanglement="none")      # off
 ```
 
-`1e-4` is a conservative starting point from simulations, not a universal
-optimum. A useful sweep: `0, 1e-5, 3e-5, 1e-4, 3e-4, 1e-3`.
+**`"correlation"` is the alternative**, adding a soft squared-correlation penalty
+to the target objective instead of transforming the targets, plus a variance
+barrier so low correlation cannot be achieved by collapsing dimensions. It
+**requires manual tuning**, and **larger `disentanglement_lambda` gives stronger
+decorrelation**.
 
-`"leave_one_out"` is the earlier experimental method, retained but not
-recommended. It residualizes each target against the others and does not
-mathematically produce orthogonal residuals. Its projection also carries no
-intercept, so it assumes near-centered targets — true of `z*` in practice, since
-`z = X @ W` on z-scored `X` is centered, but nothing enforces it.
+:::{warning}
+The old `disentanglement_lambda=1e-4` default was measured to be **inert** — on
+simulated data, Tasic mouse cortex and human pancreas it moved the mean absolute
+latent correlation by less than its own seed-to-seed noise, and so did `1e-3`. On
+pancreas, mean `|corr|` ran 0.103 (off), 0.100 (`1e-4`), 0.112 (`1e-3`), 0.080
+(`1e-2`), 0.061 (`1e-1`). The default is now `1e-2`; sweep upward from there
+(`1e-2, 3e-2, 1e-1, 3e-1`) rather than downward.
+:::
+
+**Expect either method to cost biological structure.** Decorrelation is an extra
+constraint on the latent space, and real gene programs are not orthogonal —
+overlapping pathways and shared markers are the norm — so it trades fidelity to
+that structure, and the interpretability resting on it, for a less redundant
+representation. Measured against ground truth on simulated data, orthogonalization
+moved marker-recovery F1 from 0.98 to 0.88; on Tasic and pancreas it lowered the
+share of latent variance the annotated cell type explains. `"none"` is a
+reasonable choice, and `disentanglement_alpha` exists so the trade can be made
+partially.
 
 ### Optimization and stopping
 
@@ -141,11 +175,39 @@ intercept, so it assumes near-centered targets — true of `z*` in practice, sin
 | --- | --- |
 | `target_optim_lr` | `1.0` |
 | `decoder_lr` | `1e-3` |
-| `decoder_updates_per_iteration` | `10` |
 | `max_iterations` | `1000` |
 | `enable_early_stopping` | `False` |
 | `early_stopping_patience` | `50` |
 | `batch_size` | `512` |
+
+### `batch_size` sets the decoder budget
+
+Each iteration gives the decoder **one shuffled pass** over the cells:
+`ceil(n_cells / batch_size)` AdamW steps, with every cell contributing to exactly
+one. There is no separate step-count setting — `decoder_updates_per_iteration`
+was removed in 0.5.0.
+
+The reason is that the boosting half is full-batch at every dataset size: `z*` is
+computed on all cells and the encoder is re-solved on all cells, every iteration.
+A fixed step count made the decoder's share shrink as data grew — at the old
+`10 × 512` that was every cell below 5,120, 31% at 16,000 and 5% at 100,000.
+
+:::{warning}
+Two consequences worth planning for.
+
+**Fit time now grows with cell count**, because `max_iterations` does not decay to
+compensate. Raise `batch_size` to buy it back, at the price of fewer, noisier
+steps.
+
+**On small datasets you may want a smaller `batch_size` than you think.** At the
+default 512, anything under ~1,000 cells gets one or two decoder steps per
+iteration, and effects that need the decoder to move within an iteration weaken
+or reverse. Measured on 300 cells, a PCA warm start *raised* the first
+iteration's loss at one step per iteration (1.083 against 1.023 for a zero start)
+and only paid off once the pass held enough steps (0.920 against 1.000 at
+`batch_size=8`). If a fit on few cells looks sluggish, lower `batch_size` before
+reaching for anything else.
+:::
 
 **Leave `target_optim_lr` at 1.0.** It is exposed because it is a real
 coefficient of the method, not because it is a knob: it scales the entire
@@ -196,6 +258,14 @@ model.fit(adata, max_iterations=50, seed=0, verbose=False)
 ```
 
 ## Warm starts
+
+:::{admonition} Exploratory
+:class: caution
+Under active development. Starting from an existing representation works, but it
+is applied only once, it can silently change `latent_dim`, and its benefit is
+conditional on the decoder having enough steps in the first iteration to follow
+it — see the warning below.
+:::
 
 Initialize the latent code from an existing embedding or a PCA instead of from
 zero:

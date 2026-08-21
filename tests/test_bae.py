@@ -33,7 +33,6 @@ def test_bae_fit_transform_smoke():
         latent_dim=4,
         decoder_hidden_dims=(16,),
         max_iterations=3,
-        decoder_updates_per_iteration=2,
         enable_early_stopping=False,
         device="cpu",
     )
@@ -84,59 +83,90 @@ def test_bae_encoder_reset():
 
 
 def test_disentangle_boosting_targets():
-    """Leave-one-out residuals are orthogonal to the other original targets."""
+    """Symmetric orthogonalization: mutually orthogonal columns, norms preserved.
+
+    Pins the 0.5.0 replacement of the leave-one-out residualization, which was not
+    an orthogonalization at all -- its residuals satisfied
+    ``corr(r_j, r_k) = -partial_corr(j, k | rest)``, so it swapped marginal
+    correlation for negated partial correlation and in two dimensions reduced to
+    an exact sign flip.
+    """
     from structboost._utils import disentangle_boosting_targets
 
     rng = np.random.default_rng(42)
-    n, d = 100, 4
-    base = rng.standard_normal((n, d))
-    targets = base.copy()
-    targets[:, 1] = 0.8 * targets[:, 0] + 0.2 * base[:, 1]
+    n, d = 200, 4
+    targets = rng.standard_normal((n, d))
+    targets[:, 1] = 0.9 * targets[:, 0] + 0.2 * targets[:, 1]
+    targets[:, 3] = 0.5 * targets[:, 0] - 0.6 * targets[:, 2] + 0.3 * targets[:, 3]
 
     result = disentangle_boosting_targets(targets)
     assert result.shape == targets.shape
     assert result.dtype == targets.dtype
 
-    # Each output column is orthogonal to every *original* other column. It is
-    # deliberately not claimed that the output columns are mutually orthogonal.
-    for j in range(d):
-        others = np.delete(targets, j, axis=1)
-        np.testing.assert_allclose(others.T @ result[:, j], 0.0, atol=1e-10)
+    gram = result.T @ result
+    off_diagonal = gram[~np.eye(d, dtype=bool)]
+    assert np.abs(off_diagonal).max() < 1e-8, "columns must be mutually orthogonal"
 
-    # In two dimensions simultaneous leave-one-out residualization flips the
-    # correlation sign without reducing its magnitude. This pins the method's
-    # actual mathematics and prevents it being presented as exact orthogonalization.
-    #
-    # Exact only on centered columns: the projection carries no intercept, so a
-    # shared offset dominates it. Measured on this pair, a +5 shift sends the
-    # correlation to -0.999 instead of -0.640.
-    pair = targets[:, :2]
-    pair = pair - pair.mean(axis=0)
-    pair_result = disentangle_boosting_targets(pair)
-    before = np.corrcoef(pair, rowvar=False)[0, 1]
-    after = np.corrcoef(pair_result, rowvar=False)[0, 1]
-    assert after == pytest.approx(-before, abs=1e-12)
+    # The magnitude carries the gradient step size, so it must survive.
+    np.testing.assert_allclose(
+        np.linalg.norm(result, axis=0), np.linalg.norm(targets, axis=0), rtol=1e-10
+    )
 
-    shifted = disentangle_boosting_targets(pair + 5.0)
-    shifted_corr = np.corrcoef(shifted, rowvar=False)[0, 1]
-    assert abs(shifted_corr) > abs(before), "the no-intercept caveat stopped holding"
+    # Two dimensions: the old method flipped the correlation's sign and kept its
+    # magnitude, achieving nothing. This one removes it.
+    pair = targets[:, :2] - targets[:, :2].mean(axis=0)
+    before = abs(np.corrcoef(pair, rowvar=False)[0, 1])
+    after = abs(np.corrcoef(disentangle_boosting_targets(pair), rowvar=False)[0, 1])
+    assert before > 0.5
+    assert after < 1e-6, "two-dimensional case must genuinely decorrelate"
+
+    # Permutation-equivariant: latent dimension indices carry no meaning, so
+    # relabelling and undoing the relabelling must return the same targets. A
+    # sequential (Gram-Schmidt) orthogonalization would fail this.
+    perm = np.array([2, 0, 3, 1])
+    direct = disentangle_boosting_targets(targets)
+    round_trip = disentangle_boosting_targets(targets[:, perm])[:, np.argsort(perm)]
+    np.testing.assert_allclose(direct, round_trip, atol=1e-10)
+
+    # Rank-deficient input must not blow up: no inverse is taken.
+    collapsed = targets.copy()
+    collapsed[:, 3] = collapsed[:, 2]
+    degenerate = disentangle_boosting_targets(collapsed)
+    assert np.isfinite(degenerate).all()
 
     single = rng.standard_normal((50, 1))
-    result_single = disentangle_boosting_targets(single)
-    assert result_single.shape == single.shape
-    np.testing.assert_array_equal(result_single, single)
-
-    # Unequal column scales must not destabilize the residualization; the method
-    # preserves them rather than standardizing them away.
-    unequal_var = rng.standard_normal((100, 3))
-    unequal_var[:, 0] *= 10
-    result_unequal = disentangle_boosting_targets(unequal_var)
-    assert result_unequal.shape == unequal_var.shape
-    assert not np.any(np.isnan(result_unequal))
+    np.testing.assert_array_equal(disentangle_boosting_targets(single), single)
 
 
-def test_bae_fit_with_leave_one_out_disentanglement():
-    """The earlier residualization method remains available through the new API."""
+def test_disentanglement_alpha_dial():
+    """alpha interpolates between untouched targets and fully orthogonal ones."""
+    from structboost._utils import disentangle_boosting_targets
+
+    rng = np.random.default_rng(7)
+    targets = rng.standard_normal((300, 4))
+    targets[:, 1] = 0.9 * targets[:, 0] + 0.3 * targets[:, 1]
+    targets -= targets.mean(axis=0)
+
+    def mean_abs_corr(m):
+        c = np.corrcoef(m, rowvar=False)
+        return np.abs(c[~np.eye(m.shape[1], dtype=bool)]).mean()
+
+    np.testing.assert_array_equal(disentangle_boosting_targets(targets, alpha=0.0), targets)
+
+    curve = [
+        mean_abs_corr(disentangle_boosting_targets(targets, alpha=a))
+        for a in (0.0, 0.25, 0.5, 0.75, 1.0)
+    ]
+    assert all(b < a for a, b in zip(curve, curve[1:])), "must be monotone"  # noqa: B905
+    assert curve[-1] < 1e-8, "alpha=1 is exact orthogonality"
+
+    for bad in (-0.1, 1.1, np.nan):
+        with pytest.raises(ValueError, match=r"alpha must be finite and in \[0, 1\]"):
+            disentangle_boosting_targets(targets, alpha=bad)
+
+
+def test_bae_fit_with_orthogonal_disentanglement():
+    """A fit with target orthogonalization runs and records the method it used."""
     _require_bae_deps()
 
     import anndata as ad
@@ -152,9 +182,8 @@ def test_bae_fit_with_leave_one_out_disentanglement():
         latent_dim=4,
         decoder_hidden_dims=(16,),
         max_iterations=3,
-        decoder_updates_per_iteration=2,
         enable_early_stopping=False,
-        disentanglement="leave_one_out",
+        disentanglement="orthogonal",
         device="cpu",
     )
     model = BAE(n_genes=adata.n_vars, config=config)
@@ -164,7 +193,7 @@ def test_bae_fit_with_leave_one_out_disentanglement():
     assert "X_bae" in adata.obsm
     assert adata.obsm["X_bae"].shape == (adata.n_obs, config.latent_dim)
     assert not np.any(np.isnan(adata.obsm["X_bae"]))
-    assert adata.uns["bae"]["disentanglement"] == "leave_one_out"
+    assert adata.uns["bae"]["disentanglement"] == "orthogonal"
 
 
 def test_disentanglement_config_api_and_validation():
@@ -172,13 +201,27 @@ def test_disentanglement_config_api_and_validation():
     from structboost import BAEConfig
 
     config = BAEConfig()
-    assert config.disentanglement == "none"
-    assert config.disentanglement_lambda == pytest.approx(1e-4)
+    # Changed in 0.5.0: orthogonalization is on by default, and the correlation
+    # penalty's lambda was raised from an inert 1e-4 to a value that acts.
+    assert config.disentanglement == "orthogonal"
+    assert config.disentanglement_alpha == pytest.approx(1.0)
+    assert config.disentanglement_lambda == pytest.approx(1e-2)
+    for bad in (-0.1, 1.1, np.inf):
+        with pytest.raises(ValueError, match="disentanglement_alpha must be finite"):
+            BAEConfig(disentanglement_alpha=bad)
     assert "disentangle_targets" not in BAEConfig.__dataclass_fields__
     assert "disentangle_standardize" not in BAEConfig.__dataclass_fields__
+    # Dropped in 0.5.0: the decoder update is one pass over the cells, so the
+    # step count is derived from `batch_size` rather than set.
+    assert "decoder_updates_per_iteration" not in BAEConfig.__dataclass_fields__
 
     with pytest.raises(ValueError, match="disentanglement must be one of"):
         BAEConfig(disentanglement="invalid")
+
+    # The 0.4.0 name is refused by name: the method changed as well as the label,
+    # so silently accepting it would fit something the caller did not ask for.
+    with pytest.raises(ValueError, match="renamed to 'orthogonal' in 0.5.0"):
+        BAEConfig(disentanglement="leave_one_out")
     for value in (-1.0, np.nan, np.inf):
         with pytest.raises(ValueError, match="must be finite and >= 0"):
             BAEConfig(disentanglement_lambda=value)
@@ -311,7 +354,6 @@ def test_correlation_disentanglement_reduces_fitted_latent_correlation():
                 decoder_hidden_dims=(32,),
                 boosting_stepno=20,
                 target_optim_lr=0.1,
-                decoder_updates_per_iteration=4,
                 max_iterations=20,
                 enable_early_stopping=False,
                 disentanglement=method,
@@ -327,7 +369,17 @@ def test_correlation_disentanglement_reduces_fitted_latent_correlation():
         variances[method] = np.var(z, axis=0)
 
     assert correlations["correlation"] < 0.6 * correlations["none"]
-    assert np.all(variances["correlation"] > 1e-4)
+
+    # No dimension may collapse -- but the check has to be *relative*. The latent
+    # magnitude is set by the boosting shrinkage and is small by construction, so
+    # an absolute floor tests the fit's scale rather than its anti-collapse
+    # barrier, and moves whenever training dynamics change. The barrier itself is
+    # relative (`_DISENTANGLEMENT_MIN_STD_RATIO` of the mean standard deviation);
+    # half of it leaves room for the penalty being soft rather than a constraint.
+    from structboost._model import _DISENTANGLEMENT_MIN_STD_RATIO
+
+    stds = np.sqrt(variances["correlation"])
+    assert stds.min() >= 0.5 * _DISENTANGLEMENT_MIN_STD_RATIO * stds.mean()
 
 
 def test_bae_config_decoder_weight_decay_default():
@@ -433,7 +485,6 @@ def test_split_softmax_false_matches_previous():
         latent_dim=4,
         decoder_hidden_dims=(16,),
         max_iterations=3,
-        decoder_updates_per_iteration=2,
         enable_early_stopping=False,
         seed=42,
     )
@@ -466,7 +517,6 @@ def test_split_softmax_true_compositional():
         latent_dim=latent_dim,
         decoder_hidden_dims=(16,),
         max_iterations=5,
-        decoder_updates_per_iteration=2,
         enable_early_stopping=False,
         split_softmax=True,
         seed=42,
@@ -551,7 +601,6 @@ def test_bae_transform_splitsoftmax(adata):
         latent_dim=4,
         decoder_hidden_dims=(16,),
         max_iterations=3,
-        decoder_updates_per_iteration=2,
         enable_early_stopping=False,
         split_softmax=True,
         seed=42,
@@ -585,7 +634,6 @@ def test_bae_transform_splitsoftmax_stores_varm(adata):
         latent_dim=4,
         decoder_hidden_dims=(16,),
         max_iterations=3,
-        decoder_updates_per_iteration=2,
         enable_early_stopping=False,
         split_softmax=True,
         seed=42,
@@ -621,7 +669,6 @@ def test_bae_transform_splitsoftmax_without_split_softmax_warns(adata):
         latent_dim=4,
         decoder_hidden_dims=(16,),
         max_iterations=3,
-        decoder_updates_per_iteration=2,
         enable_early_stopping=False,
         split_softmax=False,
         seed=42,
@@ -670,7 +717,6 @@ def test_bae_get_splitsoftmax_encoder_weights_clipped(adata):
         latent_dim=4,
         decoder_hidden_dims=(16,),
         max_iterations=3,
-        decoder_updates_per_iteration=2,
         enable_early_stopping=False,
         split_softmax=True,
         seed=42,
@@ -703,7 +749,6 @@ def test_bae_get_splitsoftmax_encoder_weights_unclipped(adata):
         latent_dim=4,
         decoder_hidden_dims=(16,),
         max_iterations=3,
-        decoder_updates_per_iteration=2,
         enable_early_stopping=False,
         split_softmax=True,
         seed=42,
@@ -733,7 +778,6 @@ def test_bae_get_splitsoftmax_encoder_weights_without_split_softmax_warns(adata)
         latent_dim=4,
         decoder_hidden_dims=(16,),
         max_iterations=3,
-        decoder_updates_per_iteration=2,
         enable_early_stopping=False,
         split_softmax=False,
         seed=42,
@@ -760,7 +804,6 @@ def test_bae_get_splitsoftmax_encoder_weights_tensor(adata):
         latent_dim=4,
         decoder_hidden_dims=(16,),
         max_iterations=3,
-        decoder_updates_per_iteration=2,
         enable_early_stopping=False,
         split_softmax=True,
         seed=42,
@@ -785,7 +828,6 @@ def test_bae_splitsoftmax_consistency(adata):
         latent_dim=4,
         decoder_hidden_dims=(16,),
         max_iterations=3,
-        decoder_updates_per_iteration=2,
         enable_early_stopping=False,
         split_softmax=True,
         seed=42,
@@ -929,7 +971,6 @@ def test_bae_fit_mandatory_genes_by_index():
         latent_dim=4,
         decoder_hidden_dims=(16,),
         max_iterations=3,
-        decoder_updates_per_iteration=2,
         enable_early_stopping=False,
         seed=42,
     )
@@ -1590,3 +1631,99 @@ def test_seeded_fit_is_bitwise_reproducible():
     second_latent, second_loss = run()
     np.testing.assert_array_equal(first_latent, second_latent)
     assert first_loss == second_loss
+
+
+def test_decoder_takes_one_shuffled_pass_per_iteration():
+    """Each iteration runs ceil(n_cells / batch_size) decoder steps, covering every cell.
+
+    Pins the 0.5.0 contract that replaced ``decoder_updates_per_iteration``: the
+    step count is derived from the data, and no cell is left out of the pass. The
+    partial final batch counts, so a dataset that does not divide evenly still
+    contributes all of its cells.
+    """
+    _require_bae_deps()
+
+    import math
+
+    import anndata as ad
+    import torch
+
+    from structboost import BAE, BAEConfig
+
+    rng = np.random.default_rng(0)
+    # 70 cells at batch_size 16 -> 5 batches, the last holding only 6 cells.
+    adata = ad.AnnData(rng.normal(size=(70, 12)).astype(np.float32))
+    batch_size = 16
+    expected = math.ceil(adata.n_obs / batch_size)
+    assert expected == 5
+
+    model = BAE(
+        n_genes=adata.n_vars,
+        config=BAEConfig(
+            latent_dim=3,
+            decoder_hidden_dims=(8,),
+            batch_size=batch_size,
+            max_iterations=2,
+            enable_early_stopping=False,
+            device="cpu",
+        ),
+    )
+
+    seen: list[int] = []
+    original = torch.optim.AdamW.step
+
+    def counting_step(self, *args, **kwargs):
+        seen.append(1)
+        return original(self, *args, **kwargs)
+
+    torch.optim.AdamW.step = counting_step
+    try:
+        model.fit(adata, verbose=False)
+    finally:
+        torch.optim.AdamW.step = original
+
+    assert len(seen) == expected * 2, "two iterations of one pass each"
+
+
+def test_decoder_pass_covers_every_cell_exactly_once():
+    """The pass is a partition: every cell contributes to exactly one step.
+
+    A forward pre-hook on the encoder records the minibatch each step actually
+    received, so this observes the real loop rather than re-deriving it.
+    """
+    _require_bae_deps()
+
+    import torch
+
+    from structboost import BAE, BAEConfig
+
+    # Row i is the constant vector i, so a cell is identifiable from its content
+    # and the recorded batches can be compared as a set of cell ids.
+    n_cells, n_genes, batch_size = 70, 12, 16
+    x = np.tile(np.arange(n_cells, dtype=np.float32)[:, None], (1, n_genes))
+    X = torch.from_numpy(x)
+
+    model = BAE(
+        n_genes=n_genes,
+        config=BAEConfig(
+            latent_dim=3, decoder_hidden_dims=(8,), batch_size=batch_size, device="cpu"
+        ),
+    )
+    optimizer = torch.optim.AdamW(model.decoder.parameters(), lr=1e-3)
+
+    batches: list[torch.Tensor] = []
+    handle = model.encoder.register_forward_pre_hook(
+        lambda module, args: batches.append(args[0].detach().clone())
+    )
+    try:
+        model._update_decoder(X, optimizer)
+    finally:
+        handle.remove()
+
+    assert len(batches) == 5, "ceil(70 / 16) minibatches"
+    assert [b.shape[0] for b in batches][-1] == 6, "the short final batch is not dropped"
+
+    ids = torch.cat(batches)[:, 0]
+    assert ids.numel() == n_cells
+    # Every cell exactly once: no duplicates, nothing missing.
+    assert sorted(int(v) for v in ids) == list(range(n_cells))

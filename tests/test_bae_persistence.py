@@ -323,3 +323,27 @@ def test_transform_warns_when_the_gene_panel_does_not_match(tmp_path):
     with _warnings.catch_warnings():
         _warnings.simplefilter("error", UserWarning)
         loaded.transform(adata)
+
+
+def test_loading_a_pre_0_5_checkpoint_format_is_refused(tmp_path):
+    """Format 5 carried decoder_updates_per_iteration and is refused by name.
+
+    ``restore_payload`` splats the stored config into ``BAEConfig``, so a format-5
+    file would otherwise die on an unexpected keyword argument. No migration is
+    written: the setting no longer exists, so there is nothing to migrate it to.
+    """
+    _require_deps()
+    import torch
+
+    from structboost import BAE
+    from structboost._persistence import MIN_CHECKPOINT_FORMAT
+
+    model, _ = _fit()
+    path = model.save(tmp_path / "model.pt")
+    payload = torch.load(path, weights_only=True)
+    payload["format_version"] = MIN_CHECKPOINT_FORMAT - 1
+    payload["config"]["decoder_updates_per_iteration"] = 10
+    torch.save(payload, path)
+
+    with pytest.raises(ValueError, match="no migration is provided"):
+        BAE.load(path)

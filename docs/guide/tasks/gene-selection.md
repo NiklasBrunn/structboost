@@ -47,6 +47,15 @@ explicitly. Ridge changes the estimates, so it is never applied automatically.
 
 ## Stability selection
 
+:::{admonition} Exploratory
+:class: caution
+Under active development. This works and the measurements below are real, but
+it carries **no formal error control**, its per-dimension frequencies are only
+interpretable when `dim_match_quality` is high, and its defaults have already
+moved once (the threshold went from 0.7 to 0.5 in 0.4.0). Treat its output as
+evidence to weigh rather than a settled answer.
+:::
+
 A single fit gives one gene list, and that list is not reproducible: in a
 high-dimensional space with correlated genes the encoder support is not
 identifiable, and a fit returns one of many sets that reconstruct about equally

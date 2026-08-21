@@ -19,9 +19,12 @@ The **Boosting Autoencoder (BAE)** pairs a *linear encoder fitted by componentwi
 L2 boosting* with an MLP decoder trained by gradient descent. Each training
 iteration takes a gradient step on the latent code itself and hands the result to
 the boosting fit as a regression target, so the encoder is fitted against the
-negative gradient of the reconstruction loss rather than by backpropagation.
-Componentwise boosting adds one gene at a time and shrinks each step, which keeps
-the encoder weights sparse by construction rather than by a post-hoc threshold.
+gradient-updated latent code rather than by backpropagation. The target is that
+updated code rather than the gradient alone because the encoder is rebuilt from
+zero every iteration: it has to reproduce where the code should be, not the
+correction to where it already is. Componentwise boosting adds one gene at a time
+and shrinks each step, which keeps the encoder weights sparse by construction
+rather than by a post-hoc threshold.
 
 Each latent dimension is therefore a short, signed gene list, and `X_bae` is
 exactly `X @ varm["BAE_encoder_weights"]`.
@@ -82,6 +85,17 @@ handing a representation to a collaborator who will check it against biology.
 
 It is not built to win at reconstruction. A dense autoencoder might reconstruct
 better. The point here is that its latent dimensions cannot be read.
+
+:::{admonition} Exploratory features
+:class: caution
+
+Four capabilities are **under active development** and less settled than the core
+fit: stability selection, disentanglement, starting from an existing
+representation, and starting from a prior encoder matrix. They work and each is
+documented with what is known about it, but their behaviour, defaults and APIs
+are more likely to change. See
+[the list in the user guide](guide/index.md#exploratory-features).
+:::
 
 ## Citation
 

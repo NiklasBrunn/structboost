@@ -291,7 +291,6 @@ def _fitted_model(adata, **overrides):
         boosting_stepno=4,
         max_iterations=3,
         enable_early_stopping=False,
-        decoder_updates_per_iteration=2,
         seed=0,
     )
     kwargs.update(overrides)
@@ -374,7 +373,6 @@ def test_iteration_loop_matches_the_training_loop():
         latent_dim=3,
         boosting_stepno=4,
         enable_early_stopping=False,
-        decoder_updates_per_iteration=2,
         seed=0,
     )
     two = BAE(n_genes=adata.n_vars, config=BAEConfig(max_iterations=2, **cfg))
@@ -421,10 +419,17 @@ def test_shipped_defaults_are_the_measured_ones():
 def test_poor_dimension_matching_warns_below_the_gate():
     """The gate must fire when dimensions stop keeping their identity.
 
-    A short fit on structured data permutes its dimensions enough to land under the
-    gate, which is the case the warning exists for: the counted iterations are then
-    describing different representations, and a frequency threshold prunes genes
-    attached to the wrong one.
+    An *over-parameterised* latent is the case the warning exists for: eight
+    dimensions over four planted populations leaves redundant columns with no
+    distinct structure to hold on to, so they swap between iterations and the
+    counted frequencies stop describing one representation.
+
+    Two settings are load-bearing. ``latent_dim=8`` against ``stageno=4`` creates
+    the redundancy. ``batch_size=8`` sets the decoder steps per iteration -- one
+    pass, so ceil(300 / 8) = 38 -- because the permutation is driven by the latent
+    moving between iterations, and at the default 512 these 300 cells give a
+    single step, leaving the representation too still for dimensions to swap
+    (measured quality 0.996, correctly silent).
     """
     _require_bae()
     from structboost import BAE, BAEConfig, sim_scrnaseq_anndata
@@ -433,7 +438,13 @@ def test_poor_dimension_matching_warns_below_the_gate():
     a = sim_scrnaseq_anndata(n=300, n_genes=120, stageno=4, stagep=10, seed=2)
     model = BAE(
         a.n_vars,
-        BAEConfig(latent_dim=4, max_iterations=20, enable_early_stopping=False, seed=0),
+        BAEConfig(
+            latent_dim=8,
+            batch_size=8,
+            max_iterations=20,
+            enable_early_stopping=False,
+            seed=0,
+        ),
     )
     model.fit(a, verbose=False)
 
@@ -464,14 +475,18 @@ def test_iteration_dimensions_are_matched_to_the_fitted_model():
     adata = _tiny_adata()
     model = _fitted_model(adata)
 
-    baseline = model.stability_selection(adata, n_runs=3, seed=0)
+    # Enough runs that the frequencies are not dominated by Monte-Carlo
+    # granularity: at n_runs=3 they land on multiples of 1/3 and the comparison
+    # measures rounding rather than matching. Measured max relative difference
+    # falls 0.67 -> 0.56 -> 0.27 -> 0.10 at n_runs 3, 8, 20, 40.
+    baseline = model.stability_selection(adata, n_runs=40, seed=0)
 
     # Permute the fitted encoder's rows. Matching should undo it, so the per-gene
     # frequency matrix should come back permuted the same way, not scrambled.
     perm = torch.tensor([2, 0, 1])
     with torch.no_grad():
         model.encoder.linear.weight.copy_(model.encoder.linear.weight[perm].clone())
-    permuted = model.stability_selection(adata, n_runs=3, seed=0)
+    permuted = model.stability_selection(adata, n_runs=40, seed=0)
 
     assert permuted.frequency.shape == baseline.frequency.shape
     # Column sums are permutation-equivariant; the multiset of per-dimension
@@ -494,7 +509,6 @@ def test_fit_stability_selection_is_a_flag():
         boosting_stepno=4,
         max_iterations=2,
         enable_early_stopping=False,
-        decoder_updates_per_iteration=2,
         seed=0,
     )
 
@@ -619,7 +633,6 @@ def test_aggregation_works_with_mandatory_genes():
             boosting_stepno=5,
             max_iterations=4,
             enable_early_stopping=False,
-            decoder_updates_per_iteration=2,
             seed=0,
         ),
     )
@@ -710,3 +723,91 @@ def test_module_level_stability_selection_is_silent_by_default(capsys):
     pytest.importorskip("tqdm")
     stability_selection(X, Y, n_subsamples=2, stepno=4, seed=0, verbose=True)
     assert "Stability selection" in capsys.readouterr().err
+
+
+# --- continue_optimizer -----------------------------------------------------
+
+
+def test_continue_optimizer_defaults_to_off():
+    """Off by default, so every result measured before it existed still holds."""
+    import inspect
+
+    from structboost import BAE
+
+    parameter = inspect.signature(BAE.stability_selection).parameters["continue_optimizer"]
+    assert parameter.default is False
+
+
+def test_fit_records_the_optimizer_state_and_continuation_restores_it():
+    """`fit` keeps the AdamW moments, and the flag decides whether they are restored.
+
+    Asserted on the mechanism rather than on a downstream frequency difference:
+    whether carried moments change the selected support depends on problem size,
+    so a fixture small enough to be fast is not guaranteed to show it, and a test
+    that sometimes passes for the wrong reason is worse than none.
+
+    The learning rate must come from the *current* config, not from the restored
+    param_groups -- lowering `decoder_lr` for the counting phase is the documented
+    way to damp the decoder, and `load_state_dict` would otherwise overwrite it.
+    """
+    _require_bae()
+    import torch
+
+    adata = _tiny_adata()
+    model = _fitted_model(adata)
+    assert model._decoder_optimizer_state is not None, "fit must retain the moments"
+
+    restored: list[bool] = []
+    original = torch.optim.AdamW.load_state_dict
+
+    def recording(self, state_dict):
+        restored.append(True)
+        return original(self, state_dict)
+
+    torch.optim.AdamW.load_state_dict = recording
+    try:
+        model.stability_selection(adata, n_runs=2, seed=0, verbose=False)
+        assert restored == [], "a fresh optimizer must not load any state"
+
+        model.config.decoder_lr = 5e-4
+        model.stability_selection(adata, n_runs=2, seed=0, verbose=False, continue_optimizer=True)
+        assert restored == [True], "continue_optimizer=True must restore the moments"
+    finally:
+        torch.optim.AdamW.load_state_dict = original
+
+    # The fitted model is unchanged either way.
+    assert model._is_fitted
+
+
+def test_continue_optimizer_warns_and_falls_back_without_state():
+    """A checkpoint carries no optimizer state, so the same call must not silently
+    measure something different depending on where the model came from."""
+    _require_bae()
+    adata = _tiny_adata()
+    model = _fitted_model(adata)
+    model._decoder_optimizer_state = None
+
+    with pytest.warns(UserWarning, match="no AdamW state is available"):
+        result = model.stability_selection(
+            adata, n_runs=3, seed=0, verbose=False, continue_optimizer=True
+        )
+    # Falls back to the default rather than raising.
+    baseline = model.stability_selection(adata, n_runs=3, seed=0, verbose=False)
+    np.testing.assert_array_equal(result.frequency, baseline.frequency)
+
+
+def test_saved_checkpoints_do_not_carry_optimizer_state(tmp_path):
+    """`save` excludes optimizer state deliberately; this pins that it stays out."""
+    _require_bae()
+    from structboost import BAE
+
+    adata = _tiny_adata()
+    model = _fitted_model(adata)
+    assert model._decoder_optimizer_state is not None
+
+    reloaded = BAE.load(model.save(tmp_path / "m.pt"))
+    assert reloaded._decoder_optimizer_state is None
+    with pytest.warns(UserWarning, match="no AdamW state is available"):
+        reloaded.stability_selection(
+            adata, n_runs=2, seed=0, verbose=False, continue_optimizer=True
+        )

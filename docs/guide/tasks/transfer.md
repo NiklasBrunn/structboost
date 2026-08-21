@@ -1,5 +1,13 @@
 # Transferring a model to a new dataset
 
+:::{admonition} Exploratory
+:class: caution
+Under active development. Alignment, freezing and the diagnostics all work, but
+the **latent-scale problem** below is a live limitation rather than a settled
+design: the prior and novel blocks land on incomparable scales, so every
+Euclidean consumer has to be handed `obsm["X_bae_scaled"]` instead of `X_bae`.
+:::
+
 The transferable product of a BAE fit is its **encoder matrix**: *k* sparse gene
 programs. Not the decoder, not the latent space, but the gene programs.
 {meth}`~structboost.BAE.from_reference` aligns such a matrix to a new gene panel

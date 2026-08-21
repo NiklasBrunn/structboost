@@ -29,6 +29,14 @@ warm starts from an existing embedding or a PCA.
 
 ### Getting a gene list you can trust
 
+:::{admonition} Exploratory
+:class: caution
+Stability selection is under active development. It works and is documented with
+what is known about it, but it carries no formal error control and its API and
+defaults are more likely to change than the core fit's. See
+{ref}`exploratory-features`.
+:::
+
 A single fit reports one gene list, and that list is **not reproducible**: the
 reconstruction loss converges long before the encoder support does. Two stability
 modes quantify different sources of that instability, and `mandatory_genes`
@@ -55,6 +63,13 @@ encoder deployable on data with no covariate annotation.
 → {doc}`tasks/batch-integration`
 
 ### Carrying a model to a new dataset
+
+:::{admonition} Exploratory
+:class: caution
+Weight transfer is under active development, and the latent-scale issue described
+on that page is a live limitation rather than a settled design. See
+{ref}`exploratory-features`.
+:::
 
 The transferable product of a fit is its encoder matrix: *k* sparse gene
 programs. {meth}`~structboost.BAE.from_reference` aligns such a matrix to a new
@@ -96,6 +111,45 @@ to targets. Regressing cluster indicators on genes gives per-cluster marker
 signatures directly.
 
 → {doc}`tasks/allboost`, {func}`~structboost.allboost`
+
+(exploratory-features)=
+## Exploratory features
+
+The whole package is pre-1.0, but these four are **under active development** and
+less settled than the rest. Each works and each is documented with what is known
+about it; what distinguishes them is that their behaviour, defaults and APIs are
+more likely to change, and that results from them warrant more scepticism than
+the core fit does.
+
+```{list-table}
+:header-rows: 1
+:widths: 30 70
+
+* - Feature
+  - Why it is still exploratory
+* - **Stability selection**
+  - No formal error control: `expected_false_positives` is deliberately `NaN`,
+    because training iterations are neither independent nor exchangeable.
+    Per-dimension frequencies are only meaningful when dimensions keep their
+    identity, which `dim_match_quality` reports and does not guarantee. See
+    {doc}`tasks/gene-selection`.
+* - **Disentanglement**
+  - On by default since 0.5.0, and both methods are provisional. Decorrelation
+    is an extra constraint that real gene programs do not satisfy, so it costs
+    biological structure — measured at marker-recovery F1 0.98 to 0.88 on
+    simulated data. `disentanglement_alpha` softens it; `"none"` turns it off.
+    See {doc}`tasks/fitting`.
+* - **Starting from an existing representation**
+  - `init_pca` and `init_obsm` are applied once, on the first iteration, and
+    silently override `latent_dim` when the supplied representation is a
+    different width. The benefit also depends on the decoder having enough steps
+    in that first iteration to follow the warm start. See {doc}`tasks/fitting`.
+* - **Starting from a prior encoder matrix**
+  - Transfer works, but the two latent blocks land on incomparable scales — a
+    232x gap in per-dimension standard deviation was measured — so every
+    Euclidean consumer must be handed `obsm["X_bae_scaled"]`. See
+    {doc}`tasks/transfer`.
+```
 
 ## Caveats worth reading before you trust a result
 

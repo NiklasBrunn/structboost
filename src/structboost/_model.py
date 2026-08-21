@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import functools
 import warnings
 from dataclasses import fields, replace
@@ -470,6 +471,10 @@ class BAE(nn.Module):
         self._latent_scaling: dict[str, np.ndarray] | None = None
         #: Whether the last fit built a full covariance matrix; recorded in uns.
         self._precomputed_covcache: bool = False
+        #: AdamW state from the *best* iteration of the last fit, for
+        #: `stability_selection(continue_optimizer=True)`. In-memory only: `save`
+        #: deliberately excludes optimizer state, so a loaded model has None here.
+        self._decoder_optimizer_state: dict | None = None
 
         # Move to device
         self.to(self.config.device)
@@ -487,6 +492,14 @@ class BAE(nn.Module):
         config: BAEConfig | None = None,
     ) -> BAE:
         """Build a model that carries a reference encoder matrix onto new data.
+
+        .. admonition:: Exploratory
+           :class: caution
+
+           Under active development. Alignment, freezing and the diagnostics work,
+           but the prior and novel latent blocks land on **incomparable scales** (a
+           232x gap in per-dimension standard deviation was measured), so every
+           Euclidean consumer must be handed ``obsm["X_bae_scaled"]``.
 
         The transferable product of a BAE fit is its encoder weight matrix: k0
         sparse gene programs. This constructor aligns such a matrix to ``adata``'s
@@ -1162,11 +1175,19 @@ class BAE(nn.Module):
         self,
         X: torch.Tensor,
         optimizer: torch.optim.Optimizer,
-        k_steps: int,
         *,
         D_train: torch.Tensor | None = None,
     ) -> float:
-        """Update decoder via minibatch SGD.
+        """Update the decoder with one shuffled pass over the cells.
+
+        The cells are partitioned into ``ceil(n_cells / batch_size)`` minibatches
+        and each contributes exactly one AdamW step, so the decoder half of the
+        alternation consumes the same data the boosting half does: ``z*`` is
+        computed on every cell and the encoder is re-solved on every cell.
+
+        The step *count* is therefore not a setting. It was one until 0.5.0, and a
+        fixed count made a cell's participation depend on dataset size while the
+        boosting half stayed full-batch at every size. See ``BAEConfig.batch_size``.
 
         Parameters
         ----------
@@ -1174,44 +1195,42 @@ class BAE(nn.Module):
             Full input data tensor.
         optimizer
             Optimizer for decoder parameters.
-        k_steps
-            Number of SGD steps to perform.
         D_train
             Optional obs covariate tensor for cVAE decoder conditioning.
 
         Returns
         -------
-        Average loss over the k steps.
+        Mean minibatch loss over the pass.
         """
         self.decoder.train()
         tensors = [X] if D_train is None else [X, D_train]
         dataset = TensorDataset(*tensors)
+        # `drop_last` is left at False, so a final short batch still contributes
+        # rather than silently excluding up to `batch_size - 1` cells from the
+        # pass. Safe because the decoder is a deterministic per-cell function --
+        # dropout and batch norm went in 0.3.0 -- so a small batch is a noisier
+        # step, not an invalid one. `_pretrain_decoder` has always done the same.
         loader = DataLoader(dataset, batch_size=self.config.batch_size, shuffle=True)
         total_loss = 0.0
         steps_done = 0
 
-        for _ in range(k_steps):
-            for batch_data in loader:
-                x_batch = batch_data[0]
-                d_batch = batch_data[1] if D_train is not None else None
-                optimizer.zero_grad()
-                # The encoder is fitted by boosting and is in no optimizer, so its
-                # gradient is never read. Detaching keeps backward from computing a
-                # (latent_dim, n_genes) gradient per minibatch and from accumulating
-                # it into `encoder.linear.weight.grad`, which nothing ever zeroes.
-                with torch.no_grad():
-                    z = self.encoder(x_batch)
-                h = self.split_softmax_layer(z) if self.split_softmax_layer else z
-                x_recon = self.decoder(h, d_batch)
-                loss = self._recon_loss(x_recon, x_batch)
-                loss.backward()
-                optimizer.step()
-                total_loss += loss.item()
-                steps_done += 1
-                if steps_done >= k_steps:
-                    break
-            if steps_done >= k_steps:
-                break
+        for batch_data in loader:
+            x_batch = batch_data[0]
+            d_batch = batch_data[1] if D_train is not None else None
+            optimizer.zero_grad()
+            # The encoder is fitted by boosting and is in no optimizer, so its
+            # gradient is never read. Detaching keeps backward from computing a
+            # (latent_dim, n_genes) gradient per minibatch and from accumulating
+            # it into `encoder.linear.weight.grad`, which nothing ever zeroes.
+            with torch.no_grad():
+                z = self.encoder(x_batch)
+            h = self.split_softmax_layer(z) if self.split_softmax_layer else z
+            x_recon = self.decoder(h, d_batch)
+            loss = self._recon_loss(x_recon, x_batch)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+            steps_done += 1
 
         return total_loss / max(steps_done, 1)
 
@@ -1491,10 +1510,11 @@ class BAE(nn.Module):
         1. Computing boosting targets via gradient step: z* = z - lr * ∂L_target/∂z,
            where L_target sums the squared error over cells and averages it over
            genes (see ``_compute_boosting_targets``)
-        2. (Optional) Applying leave-one-out target residualization
+        2. (Optional) Orthogonalizing the targets across latent dimensions
         3. Resetting encoder weights to zero
         4. Fitting encoder via allboost to map X → z*
-        5. Updating decoder via minibatch SGD
+        5. Updating the decoder with one shuffled pass over the cells, i.e.
+           ``ceil(n_cells / batch_size)`` AdamW steps
 
         Parameters
         ----------
@@ -1564,14 +1584,15 @@ class BAE(nn.Module):
             (``dW``, which converges toward 0) and the number of selected genes
             (``n_sel``) to the progress bar. Does not change the fitted model.
         init_obsm
-            Warm-start the latent state from ``adata.obsm[init_obsm]`` instead of
-            from zero. If that representation has a different number of columns
+            **Exploratory**, under active development; see :class:`BAE` notes on
+            warm starts. Warm-start the latent state from ``adata.obsm[init_obsm]``
+            instead of from zero. If that representation has a different number of columns
             than ``config.latent_dim``, the representation wins: ``latent_dim`` is
             overwritten for this fit and a ``UserWarning`` is emitted. Mutually
             exclusive with ``init_pca``.
         init_pca
-            Warm-start from a PCA of ``adata.X`` keeping ``config.latent_dim``
-            components. The data is never rescaled, and it is mean-centered only
+            **Exploratory**, under active development. Warm-start from a PCA of
+            ``adata.X`` keeping ``config.latent_dim`` components. The data is never rescaled, and it is mean-centered only
             when it is not already z-transformed, so no transformation is applied
             on top of one the caller already performed. Mutually exclusive with
             ``init_obsm``.
@@ -1888,6 +1909,7 @@ class BAE(nn.Module):
         patience_counter = 0
         best_encoder_weights = None
         best_decoder_state = None
+        best_optimizer_state = None
         best_batch_weights = None
 
         # Training loop
@@ -1921,13 +1943,15 @@ class BAE(nn.Module):
                 z_override=z_init if iteration == 0 else None,
             )
 
-            # STEP 2 (optional): retain the earlier leave-one-out residualization
-            # method. The recommended correlation method is already part of the
-            # differentiable target objective computed in step 1.
-            if self.config.disentanglement == "leave_one_out":
+            # STEP 2 (optional): orthogonalize the targets across latent
+            # dimensions. The correlation method needs nothing here -- its
+            # penalty is already part of the objective computed in step 1.
+            if self.config.disentanglement == "orthogonal":
                 from ._utils import disentangle_boosting_targets
 
-                targets = disentangle_boosting_targets(targets)
+                targets = disentangle_boosting_targets(
+                    targets, alpha=self.config.disentanglement_alpha
+                )
 
             # STEP 3: Reset encoder weights before boosting (rebuild from scratch)
             self.encoder.reset_weights()
@@ -1984,11 +2008,10 @@ class BAE(nn.Module):
             if collect_diagnostics:
                 diag_stats["loss_post_boost"] = self._full_recon_loss(X_train, D_condition)[0]
 
-            # STEP 5: Update decoder via minibatch SGD
+            # STEP 5: Update decoder with one shuffled pass over the cells
             train_loss = self._update_decoder(
                 X_train,
                 decoder_optimizer,
-                self.config.decoder_updates_per_iteration,
                 D_train=D_condition,
             )
             self._training_history["train_loss"].append(train_loss)
@@ -2014,6 +2037,11 @@ class BAE(nn.Module):
                 patience_counter = 0
                 best_encoder_weights = self.encoder.linear.weight.detach().clone()
                 best_decoder_state = {k: v.clone() for k, v in self.decoder.state_dict().items()}
+                # Snapshotted *here*, not at the end of the loop: `fit` returns the
+                # best iteration's weights, so end-of-loop moments would belong to a
+                # decoder that is not the one being returned. Pairing them would
+                # manufacture an inconsistency rather than continue a state.
+                best_optimizer_state = copy.deepcopy(decoder_optimizer.state_dict())
                 best_batch_weights = batch_weights
             else:
                 patience_counter += 1
@@ -2056,6 +2084,7 @@ class BAE(nn.Module):
             self.encoder.set_weights(best_encoder_weights)
         if best_decoder_state is not None:
             self.decoder.load_state_dict(best_decoder_state)
+        self._decoder_optimizer_state = best_optimizer_state
         self._batch_weights = best_batch_weights
 
         self._is_fitted = True
@@ -2175,6 +2204,7 @@ class BAE(nn.Module):
         n_iterations: int,
         seed: int | None,
         verbose: bool = True,
+        continue_optimizer: bool = False,
     ) -> tuple[np.ndarray, np.ndarray, float, tuple[np.ndarray, np.ndarray, np.ndarray]]:
         """Selection frequency over ``n_iterations`` further training iterations.
 
@@ -2283,6 +2313,30 @@ class BAE(nn.Module):
             lr=self.config.decoder_lr,
             weight_decay=self.config.decoder_weight_decay,
         )
+        if continue_optimizer:
+            if self._decoder_optimizer_state is None:
+                # Never silent: a loaded checkpoint carries no optimizer state (see
+                # `save`), so the same call would otherwise return different numbers
+                # depending on whether the model came from disk or from `fit`.
+                warnings.warn(
+                    "continue_optimizer=True but no AdamW state is available; the "
+                    "moments are only kept in memory by `fit` and are not written to "
+                    "a checkpoint. Falling back to a fresh optimizer, which is the "
+                    "default behaviour. Re-fit in this session to use continuation.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+            else:
+                decoder_optimizer.load_state_dict(copy.deepcopy(self._decoder_optimizer_state))
+                # `load_state_dict` restores `param_groups` too, including the
+                # learning rate that was in force during `fit`. That would silently
+                # override a caller who lowered `config.decoder_lr` for this phase --
+                # the documented way to damp the decoder while counting -- so the
+                # current config is re-applied over the restored groups. Only the
+                # moment estimates are carried across, which is the point.
+                for group in decoder_optimizer.param_groups:
+                    group["lr"] = self.config.decoder_lr
+                    group["weight_decay"] = self.config.decoder_weight_decay
 
         from scipy.optimize import linear_sum_assignment
 
@@ -2318,10 +2372,12 @@ class BAE(nn.Module):
                     lr=self.config.target_optim_lr,
                     obs_covariates=D_condition,
                 )
-                if self.config.disentanglement == "leave_one_out":
+                if self.config.disentanglement == "orthogonal":
                     from ._utils import disentangle_boosting_targets
 
-                    targets = disentangle_boosting_targets(targets)
+                    targets = disentangle_boosting_targets(
+                        targets, alpha=self.config.disentanglement_alpha
+                    )
                 self.encoder.reset_weights()
                 fit_targets, beta_init, fit_mandatory = self._transfer_boosting_inputs(
                     targets, sourcemat_aug.shape[1], prior_dims, allboost_mandatory
@@ -2404,7 +2460,6 @@ class BAE(nn.Module):
                 self._update_decoder(
                     X_train,
                     decoder_optimizer,
-                    self.config.decoder_updates_per_iteration,
                     D_train=D_condition,
                 )
         finally:
@@ -2445,8 +2500,17 @@ class BAE(nn.Module):
         threshold: float = 0.5,
         seed: int | None = None,
         verbose: bool = True,
+        continue_optimizer: bool = False,
     ):
         """Stability-select genes for each latent dimension of the fitted model.
+
+        .. admonition:: Exploratory
+           :class: caution
+
+           Under active development. This provides **no formal error control**, and
+           its per-dimension frequencies are only interpretable when
+           ``dim_match_quality`` is high. Defaults have already moved once
+           (``threshold`` went from 0.7 to 0.5 in 0.4.0).
 
         Records how often each gene is selected across ``n_runs`` further training
         iterations continued from the fitted state, then restores the model, so the
@@ -2503,6 +2567,30 @@ class BAE(nn.Module):
         verbose
             Show a progress bar. On by default: ``n_runs`` defaults to 300 further
             training steps, which is a long silence.
+        continue_optimizer
+            Carry the decoder's AdamW moment estimates over from :meth:`fit` instead
+            of starting them at zero. Default False, which preserves the behaviour
+            every earlier result was measured under.
+
+            The reset is not free. A fresh AdamW restarts its step counter, so bias
+            correction begins again and ``exp_avg_sq`` needs on the order of
+            ``1/(1 - beta2) = 1000`` steps to become a usable variance estimate.
+            An iteration takes ``ceil(n_cells / batch_size)`` steps, so that
+            transient spans roughly ``1000 * batch_size / n_cells`` of the counted
+            iterations — brief on a large dataset (about 31 of ``n_runs=300`` at
+            16,000 cells) but most of the window on a small one (about 250 of 300
+            at 2,000 cells), and it falls at the end where the support is furthest
+            from equilibrium. Continuing removes it, and the smaller the dataset
+            the more it is worth doing.
+
+            The state is the one from the iteration ``fit`` *restored*, not from its
+            last iteration, so the moments belong to the decoder actually returned.
+            It is held in memory only: :meth:`save` deliberately excludes optimizer
+            state, so a model read back from a checkpoint has none and this argument
+            warns and falls back rather than silently changing what it measures.
+
+            A caller who lowered ``config.decoder_lr`` for this phase keeps that
+            change; only the moment estimates are carried across.
 
         Returns
         -------
@@ -2531,7 +2619,11 @@ class BAE(nn.Module):
         from ._stability import StabilitySelectionResult
 
         frequency, avg_selected, quality, coefficients = self._iteration_support_frequency(
-            adata, n_iterations=n_runs, seed=seed, verbose=verbose
+            adata,
+            n_iterations=n_runs,
+            seed=seed,
+            verbose=verbose,
+            continue_optimizer=continue_optimizer,
         )
         result = StabilitySelectionResult(
             frequency=frequency,
@@ -2555,6 +2647,7 @@ class BAE(nn.Module):
         uns = adata.uns.setdefault("bae", {})
         uns["stability_selection"] = {
             "mode": "iteration",
+            "continue_optimizer": bool(continue_optimizer),
             "threshold": result.threshold,
             "n_iterations": result.n_iterations,
             "n_stable_per_dim": result.stable_support.sum(axis=0).astype(np.intp),

@@ -61,9 +61,17 @@ MAGIC = "structboost.bae"
 #: written by a released version (0.2.0), and no migration is written: the method
 #: is under active development and a checkpoint is cheap to regenerate, whereas a
 #: compatibility shim for options that no longer exist is not.
-CHECKPOINT_FORMAT = 5
+#:
+#: 6 — ``BAEConfig.decoder_updates_per_iteration`` was dropped when the decoder
+#: update became one pass over the cells. Same splatting hazard as formats 4 and
+#: 5: a format-5 file carries the field, and ``BAEConfig(**stored)`` would raise
+#: an unexpected-keyword ``TypeError`` rather than a readable refusal. As in
+#: 0.3.0 this breaks files written by a released version (0.4.0) and no migration
+#: is written — the setting no longer exists, so there is nothing to migrate it
+#: to, and a checkpoint is cheap to regenerate.
+CHECKPOINT_FORMAT = 6
 #: Oldest format this install can read.
-MIN_CHECKPOINT_FORMAT = 5
+MIN_CHECKPOINT_FORMAT = 6
 
 #: Category element types that survive the round trip with their comparison
 #: semantics intact. ``bool`` precedes ``int`` because ``bool`` is a subclass of

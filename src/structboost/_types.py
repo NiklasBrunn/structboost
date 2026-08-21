@@ -121,20 +121,64 @@ class BAEConfig:
         built. That is what ``"auto"`` guards against; set ``False`` explicitly on
         a memory-constrained machine.
     disentanglement
-        Latent-dimension disentanglement method. ``"none"`` (default) applies no
-        constraint. ``"correlation"`` adds a soft, differentiable squared-
-        correlation penalty to the functional-gradient target objective and is the
-        recommended method. ``"leave_one_out"`` retains the earlier experimental
-        target residualization method, in which each target column is regressed on
-        all other original target columns. Leave-one-out reduces some redundancies
-        but does not mathematically produce mutually orthogonal residuals.
+        **Exploratory**, under active development.
+
+        Latent-dimension disentanglement method, ``"orthogonal"`` by default.
+        That method replaces the boosting targets with the nearest mutually
+        orthogonal set of the same column norms — symmetric Löwdin
+        orthogonalization, computed from the thin SVD. ``"none"`` applies no
+        constraint.
+
+        Its strength is set by ``disentanglement_alpha``: full orthogonality at
+        the default ``1.0``. **Decorrelation can be softened** by choosing an
+        alpha strictly between 0 and 1, which applies the constraint only
+        partially.
+
+        ``"correlation"`` is the alternative, adding a soft squared-correlation
+        penalty to the target objective rather than transforming the targets. It
+        **requires manual tuning** — its effect is negligible at small ``lambda``,
+        and **larger values give stronger decorrelation** — whereas
+        ``"orthogonal"`` has a bounded dial that needs no calibration.
+
+        Expect either method to cost some biological structure: decorrelation is
+        an extra constraint on the latent space and real gene programs are not
+        orthogonal — overlapping pathways and shared markers are the norm — so it
+        trades fidelity to that structure, and the interpretability that rests on
+        it, for a less redundant representation. Measured against ground truth on
+        simulated data, orthogonalization moved marker-recovery F1 from 0.98 to
+        0.88, and on Tasic and human pancreas it lowered the share of latent
+        variance explained by the annotated cell type. ``"none"`` therefore
+        remains a reasonable choice.
+    disentanglement_alpha
+        Strength of the orthogonality constraint, used only when
+        ``disentanglement="orthogonal"``. The targets become
+        ``(1 - alpha) * targets + alpha * orthogonalized``, so ``1.0`` (default)
+        makes them exactly orthogonal and ``0.0`` leaves them untouched, which is
+        equivalent to ``disentanglement="none"``.
+
+        Lower it to soften the constraint when full orthogonality costs more
+        biological structure than the redundancy it removes is worth. Unlike
+        ``disentanglement_lambda`` the scale is bounded and interpretable, so no
+        calibration sweep is needed to find a usable range — the endpoints are
+        known and the response is monotone in between.
     disentanglement_lambda
-        Strength of the soft correlation penalty. The penalty is normalized over
-        latent-dimension pairs and scaled with the number of cells so that this
-        value has the same meaning at different dataset sizes. Default ``1e-4`` is
-        a conservative starting point from simulations; it is not universally
-        optimal. A useful tuning grid is ``0, 1e-5, 3e-5, 1e-4, 3e-4, 1e-3``.
-        Only used when ``disentanglement="correlation"``.
+        Strength of the soft correlation penalty; used only when
+        ``disentanglement="correlation"``. **Larger values decorrelate more
+        strongly.** The penalty is normalized over latent-dimension pairs and
+        scaled with the number of cells, so the value means the same thing at
+        different dataset sizes.
+
+        Raised to ``1e-2`` in 0.5.0. The previous ``1e-4`` was measured to be
+        inert — on simulated data, Tasic mouse cortex and human pancreas it moved
+        the mean absolute latent correlation by less than its own seed-to-seed
+        noise — and so was ``1e-3``. The penalty begins to act at ``1e-2`` and is
+        strong at ``1e-1``. On pancreas, mean ``|corr|`` ran 0.103 (off), 0.100
+        (``1e-4``), 0.112 (``1e-3``), 0.080 (``1e-2``), 0.061 (``1e-1``), the last
+        costing noticeably more cell-type structure.
+
+        This is a starting point rather than a tuned optimum, and the right value
+        is dataset-dependent. Sweep upward — ``1e-2, 3e-2, 1e-1, 3e-1`` — watching
+        latent correlation against whatever downstream structure matters to you.
     target_optim_lr
         Step size for computing boosting targets via gradient descent on z.
         Targets are computed as z* = z - lr * ∂L_target/∂z (single gradient step),
@@ -161,14 +205,12 @@ class BAEConfig:
         Weight decay (L2 penalty) for the AdamW decoder optimizer.
         Default is 0.0 (no penalty). Increase for decoder weight
         regularisation (typical range: 1e-5 to 1e-2).
-    decoder_updates_per_iteration
-        Number of decoder SGD steps per training iteration.
     max_iterations
         Maximum number of training iterations.
     enable_early_stopping
         If True, stop training early when the checkpoint-selection loss does not
         decrease for `early_stopping_patience` iterations. This is the decoder
-        training MSE for ``disentanglement="none"`` and ``"leave_one_out"``; for
+        training MSE for ``disentanglement="none"`` and ``"orthogonal"``; for
         ``"correlation"`` it additionally includes the weighted disentanglement
         penalty. **Default False**: train for exactly `max_iterations`.
 
@@ -192,7 +234,23 @@ class BAEConfig:
         improvement required to trigger early stopping. Only used if
         enable_early_stopping is True. Default is 50.
     batch_size
-        Minibatch size for decoder SGD updates.
+        Minibatch size for decoder SGD updates, and with it the number of decoder
+        updates each training iteration performs: the cells are shuffled and
+        partitioned, so one iteration runs ``ceil(n_cells / batch_size)`` steps and
+        every cell contributes to exactly one of them.
+
+        That coupling is the point, and it replaced a separate
+        ``decoder_updates_per_iteration`` in 0.5.0. A fixed step count made a
+        cell's participation depend on dataset size — at 10 steps of 512 the
+        decoder saw every cell below 5,120 cells, 31% at 16,000 and 5% at 100,000
+        — while the boosting half of the alternation is full-batch at every size:
+        ``z*`` is computed on all cells and the encoder is re-solved on all cells,
+        every iteration. Tying the decoder budget to the data makes both halves
+        consume the same cells per iteration.
+
+        The cost is that fit time now grows with ``n_cells``, since
+        ``max_iterations`` does not decay to compensate. Raising ``batch_size``
+        buys the time back at the price of fewer, noisier steps.
     seed
         Random seed for reproducibility. If None, no seed is set.
         Controls train/val split, weight initialization, and SGD shuffling.
@@ -221,14 +279,14 @@ class BAEConfig:
     boosting_precompute_covcache: bool | Literal["auto"] = "auto"
     nuisance_ridge: float = 0.0
     prior_mode: Literal["frozen", "anchored"] = "frozen"
-    disentanglement: Literal["none", "correlation", "leave_one_out"] = "none"
-    disentanglement_lambda: float = 1e-4
+    disentanglement: Literal["none", "correlation", "orthogonal"] = "orthogonal"
+    disentanglement_alpha: float = 1.0
+    disentanglement_lambda: float = 1e-2
     # Target computation
     target_optim_lr: float = 1.0
     # Training parameters
     decoder_lr: float = 1e-3
     decoder_weight_decay: float = 0.0
-    decoder_updates_per_iteration: int = 10
     max_iterations: int = 1000
     enable_early_stopping: bool = False
     early_stopping_patience: int = 50
@@ -256,12 +314,26 @@ class BAEConfig:
             raise ValueError("prior_mode must be 'frozen' or 'anchored'")
         if not 0.0 < self.boosting_nu <= 1.0:
             raise ValueError("boosting_nu must be in (0.0, 1.0]")
-        if self.disentanglement not in {"none", "correlation", "leave_one_out"}:
+        if self.disentanglement == "leave_one_out":
+            # Renamed in 0.5.0 along with the method itself, which no longer does
+            # leave-one-out. Named explicitly because the generic message below
+            # would not tell a user carrying 0.4.0 code what to write instead.
             raise ValueError(
-                "disentanglement must be one of 'none', 'correlation', or 'leave_one_out'"
+                "disentanglement='leave_one_out' was renamed to 'orthogonal' in 0.5.0, "
+                "when the method became a true orthogonalization rather than a "
+                "leave-one-out residualization. Pass 'orthogonal' instead, or 'none' "
+                "to restore the 0.4.0 default of no constraint."
+            )
+        if self.disentanglement not in {"none", "correlation", "orthogonal"}:
+            raise ValueError(
+                "disentanglement must be one of 'none', 'correlation', or 'orthogonal'"
             )
         if not np.isfinite(self.disentanglement_lambda) or self.disentanglement_lambda < 0:
             raise ValueError("disentanglement_lambda must be finite and >= 0")
+        if not np.isfinite(self.disentanglement_alpha) or not (
+            0.0 <= self.disentanglement_alpha <= 1.0
+        ):
+            raise ValueError("disentanglement_alpha must be finite and in [0, 1]")
         if self.decoder_weight_decay < 0:
             raise ValueError("decoder_weight_decay must be >= 0")
         if self.max_iterations < 1:

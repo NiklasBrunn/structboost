@@ -130,47 +130,84 @@ def resolve_precompute_covcache(setting: bool | str, n_features: int) -> bool:
 
 def disentangle_boosting_targets(
     targets: NDArray[np.floating],
+    *,
+    alpha: float = 1.0,
 ) -> NDArray[np.floating]:
-    """Orthogonalize gradient vectors across latent dimensions.
+    """Move the boosting targets toward the nearest mutually orthogonal set.
 
-    For each gradient vector (column), computes the residual after removing
-    the linear projection onto the subspace spanned by all other columns.
-    This encourages the subsequent boosting step to learn encoder weights
-    that produce disentangled latent representations.
+    Symmetric (Löwdin) orthogonalization: the orthogonal matrix closest to
+    ``targets`` in Frobenius norm, rescaled so each column keeps its original
+    norm. Computed from the thin SVD, since ``T = U S V'`` gives
+    ``T (T'T)^{-1/2} = U V'`` -- no inverse and no matrix square root, so a
+    rank-deficient target matrix (two latent dimensions that have collapsed onto
+    each other) yields an orthogonal result instead of blowing up.
 
-    The regression carries **no intercept**: columns are projected through the
-    origin, not about their means. On centered targets that is the textbook
-    residualization — in two dimensions it flips the correlation's sign and
-    preserves its magnitude exactly. On targets with a substantial common offset
-    it is not: a shared mean dominates the projection, and measured on a synthetic
-    pair a shift of +5 turned a correlation of +0.64 into -0.999 rather than the
-    -0.64 the centered case gives. BAE's targets ``z*`` are near-centered because
-    ``z = X @ W`` on z-scored ``X`` is, so this is ordinarily a non-issue; it is
-    documented because nothing enforces it.
+    Rescaling matters: the raw ``U V'`` has unit-norm columns, and the target
+    magnitude carries the gradient step size that ``target_optim_lr`` scales.
+    Normalizing it away would sever the target from the latent code it came from.
+
+    ``alpha`` interpolates: ``(1 - alpha) * targets + alpha * orthogonalized``.
+    At ``1.0`` the targets are exactly orthogonal, at ``0.0`` they are untouched,
+    and in between the constraint is applied partially. Interpolating is
+    meaningful precisely because Löwdin returns the *closest* orthogonal matrix,
+    so the two endpoints are already sign- and direction-aligned; a basis from an
+    eigendecomposition would carry arbitrary column signs and could not be blended
+    this way. Note that intermediate values are no longer orthogonal -- ``alpha``
+    is a strength dial, not a partial orthogonalization.
+
+    .. note::
+       Before 0.5.0 this performed a *leave-one-out* residualization: each column
+       was regressed on all the others and replaced by the residual. That is not
+       an orthogonalization. Writing ``Theta`` for the precision matrix of the
+       targets, those residuals satisfy
+       ``corr(r_j, r_k) = -rho_{jk|rest}`` exactly -- the transform replaced the
+       marginal correlation structure with the *negated partial* correlation
+       structure rather than removing it. In two dimensions it reduced to
+       ``corr -> -corr``, an exact sign flip achieving nothing; in higher
+       dimensions it could amplify a correlation, or manufacture one between
+       columns that were nearly independent.
 
     Parameters
     ----------
     targets
-        Boosting target matrix of shape (n_samples, latent_dim).
-        Each column is the negative gradient for one latent dimension.
+        Boosting target matrix of shape (n_samples, latent_dim), one column per
+        latent dimension.
+    alpha
+        Constraint strength in ``[0, 1]``; ``1.0`` (default) fully orthogonalizes.
 
     Returns
     -------
-    Orthogonalized target matrix of shape (n_samples, latent_dim).
+    Target matrix of the same shape. At ``alpha=1`` the columns are exactly
+    mutually orthogonal up to floating-point error and each keeps its original
+    norm.
+
+    Notes
+    -----
+    Symmetric rather than sequential (Gram-Schmidt) on purpose. Gram-Schmidt also
+    produces an orthogonal set, but the result depends on the order the columns
+    are visited: the last dimension is returned untouched and the first is
+    stripped hardest. Latent dimension indices carry no meaning here -- they
+    permute freely, which is why :meth:`structboost.BAE.stability_selection`
+    matches them before counting -- so an order-dependent transform would impose
+    an arbitrary hierarchy. Löwdin is permutation-equivariant, and measured no
+    worse: the two agreed to within seed noise on both real datasets tried.
+
+    Cost is ``O(n_samples * latent_dim**2)``, against ``O(n_samples *
+    latent_dim**3)`` for any formulation that runs one least-squares solve per
+    column.
     """
-    n_dims = targets.shape[1]
-    if n_dims == 1:
+    if not np.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
+        raise ValueError(f"alpha must be finite and in [0, 1], got {alpha}")
+    if targets.shape[1] == 1 or alpha == 0.0:
         return targets.copy()
 
-    work = targets
-    result = np.empty_like(work)
-    for j in range(n_dims):
-        other_cols = np.delete(work, j, axis=1)
-        y = work[:, j]
-        coeffs, *_ = np.linalg.lstsq(other_cols, y, rcond=None)
-        fitted = other_cols @ coeffs
-        result[:, j] = y - fitted
-
+    work = np.asarray(targets, dtype=np.float64)
+    norms = np.linalg.norm(work, axis=0)
+    # `U @ Vt` is the orthogonal polar factor of `work`: orthonormal columns, and
+    # the closest such matrix in Frobenius norm.
+    u, _, vt = np.linalg.svd(work, full_matrices=False)
+    orthogonal = (u @ vt) * norms
+    result = orthogonal if alpha == 1.0 else (1.0 - alpha) * work + alpha * orthogonal
     return result.astype(targets.dtype, copy=False)
 
 

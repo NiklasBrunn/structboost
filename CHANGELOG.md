@@ -3,6 +3,140 @@
 Releases follow [semantic versioning](https://semver.org). While the project is
 pre-1.0, a minor bump may break API.
 
+### [0.5.0] - 2026-08-21
+
+**Breaking**, in two parts: the decoder update became one pass over the cells,
+and the disentanglement default changed.
+
+**`BAEConfig.decoder_updates_per_iteration` is gone.** Each training
+iteration now gives the decoder **one shuffled pass over the cells** —
+`ceil(n_cells / batch_size)` AdamW steps, with every cell contributing to exactly
+one of them — so the step count is derived from the data rather than set.
+
+The reason is an asymmetry that grew with dataset size. The boosting half of the
+alternation is full-batch at every size: `z*` is computed on all cells and the
+encoder is re-solved from zero against all cells, every iteration. A fixed
+decoder step count made a *cell's* participation depend on how many other cells
+existed — at the old `10 × 512` the decoder saw every cell below 5,120 cells,
+31% at 16,000 and 5% at 100,000, while the decoder that defines the target for
+all of them had been trained on that shrinking slice. Tying the budget to the
+data makes both halves consume the same cells per iteration, and it is the same
+per-cell invariance that `target_optim_lr` already provides on the target side.
+
+**No quality claim is attached to this change, because none could be
+established.** On human pancreas (16,382 cells, 2,000 batch-aware HVGs, nine
+protocols, `nu=0.3`, 1000 iterations, one seed) the epoch rule raised in-sample
+variance explained from 0.3100 to 0.3217 at `stepno=50` and 0.3414 to 0.3556 at
+`stepno=100` — but in-sample reconstruction rewards the arm taking 3.2x the
+steps, so that is not evidence. Cell-type silhouette moved the other way,
+0.298 → 0.172 and 0.327 → 0.169; on an 80/20 split of the same data it moved the
+*opposite* way again (0.265 → 0.333, 0.218 → 0.268). Two conditions, opposite
+orderings, one seed each: within run-to-run variance for a method whose encoder
+support random-walks. The case for the change is the invariance above, not a
+measured improvement.
+
+What is established is the cost: **roughly 2x wall clock** at this dataset size
+(99s → 201s at `stepno=50`, 131s → 238s at `stepno=100`), and it grows with cell
+count because `max_iterations` does not decay to compensate. scVI, which is
+epoch-based in the same way, pairs epochs with a `max_epochs` cap that decays as
+1/n; no such heuristic is added here, so raising `batch_size` is the lever.
+
+Keeping a dial (`decoder_epochs_per_iteration = 1.0`, same default, still
+tunable) was considered and rejected: the goal was to remove a setting, and a
+float multiplier on a pass is a second way to say what `batch_size` already says.
+The consequence is that decoder effort per boosting iteration is no longer
+adjustable except through `batch_size`.
+
+**Small datasets need a smaller `batch_size` than the default suggests.** Below
+about 1,000 cells the default 512 yields one or two steps per iteration, and
+effects that require the decoder to move *within* an iteration weaken or reverse.
+Measured on 300 cells, a PCA warm start raised the first iteration's loss at one
+step per iteration (1.083 against 1.023 for a zero start), tied at ten, and only
+paid off at thirty-eight (0.920 against 1.000). The guide documents this.
+
+**Migration:** drop the argument. `BAEConfig(decoder_updates_per_iteration=10)`
+now raises `TypeError`. Setting `batch_size = ceil(n_cells / 10)` reproduces the
+old *step count*, though not the old batch size, so results will differ either
+way.
+
+**`disentanglement="leave_one_out"` is renamed to `"orthogonal"`, and is now the
+default.** It replaces the boosting targets with the nearest mutually orthogonal
+set of the same column norms — symmetric Löwdin orthogonalization, computed from
+the thin SVD as `U @ Vt`, since `T (T'T)^{-1/2} = U V'`. The old name is refused
+with a message naming the new one, rather than falling through to the generic
+"must be one of" error.
+
+The previous implementation was not an orthogonalization. It regressed each
+target column on all the others and kept the residual, which yields
+`corr(r_j, r_k) = -rho_{jk|rest}` exactly: the marginal correlation structure
+replaced by the *negated partial* correlation structure rather than removed. In
+two dimensions that reduces to `corr -> -corr`, an exact sign flip achieving
+nothing; in higher dimensions it could amplify a correlation, or manufacture one
+between columns that were near-independent. Measured on human pancreas it reached
+mean `|corr|` 0.048 against 0.033 for a correct orthogonalization, while selecting
+fewer genes (276 against 294) and reconstructing slightly worse.
+
+Symmetric rather than sequential (Gram-Schmidt), which also orthogonalizes but
+depends on the order the columns are visited — it returns the last dimension
+untouched and strips the first hardest. Latent indices permute freely, which is
+why `stability_selection` matches them before counting, so an order-dependent
+transform would impose an arbitrary hierarchy. The two measured within seed noise
+of each other on both real datasets. Löwdin is also cheaper: `O(n * d**2)` against
+`O(n * d**3)` for anything running one least-squares solve per column, measured
+6-16x faster and widening with latent width, and it needs no inverse so a
+rank-deficient target matrix orthogonalizes instead of raising.
+
+**New `BAEConfig.disentanglement_alpha`, default `1.0`.** Targets become
+`(1 - alpha) * targets + alpha * orthogonalized`, so decorrelation can be softened
+by choosing an alpha strictly between 0 and 1; `0.0` is equivalent to
+`disentanglement="none"`. Interpolation is meaningful because Löwdin returns the
+*closest* orthogonal matrix, so the endpoints are already sign-aligned.
+
+**`disentanglement_lambda` default raised from `1e-4` to `1e-2`.** The old default
+was inert: on simulated data, Tasic mouse cortex and human pancreas it moved the
+mean absolute latent correlation by less than its own seed-to-seed noise, and so
+did `1e-3`. On pancreas, mean `|corr|` ran 0.103 (off), 0.100 (`1e-4`), 0.112
+(`1e-3`), 0.080 (`1e-2`), 0.061 (`1e-1`). The documented sweep grid, which topped
+out at `1e-3`, ended below where the penalty begins to act; the guide now sweeps
+upward from `1e-2`.
+
+**Expect the default to cost some biological structure.** Decorrelation is an
+extra constraint and real gene programs are not orthogonal, so it trades fidelity
+to that structure, and the interpretability resting on it, for a less redundant
+representation. Measured against ground truth on simulated data, marker-recovery
+F1 moved from 0.98 to 0.88; on Tasic and pancreas the share of latent variance
+explained by the annotated cell type fell. `disentanglement="none"` remains a
+reasonable choice, and `disentanglement_alpha` exists so the trade can be made
+partially.
+
+**Migration:** `disentanglement="leave_one_out"` becomes `"orthogonal"`, or
+`"none"` to restore the 0.4.0 default of no constraint. Note that `"orthogonal"`
+is not a renamed version of the old behaviour — the method itself changed, so a
+0.4.0 fit is reproduced by `"none"`, not by the new name.
+
+**New `BAE.stability_selection(continue_optimizer=...)`, default `False`.** Carries
+the decoder's AdamW moment estimates over from `fit` instead of restarting them at
+zero. A fresh AdamW restarts its step counter, so bias correction begins again and
+`exp_avg_sq` needs on the order of `1/(1 - beta2) = 1000` steps to become a usable
+variance estimate; at `ceil(n_cells / batch_size)` steps per iteration that
+transient spans roughly `1000 * batch_size / n_cells` of the counted iterations —
+brief on a large dataset, most of the window on a small one, and it falls at the
+end where the support is furthest from equilibrium.
+
+The state is the one from the iteration `fit` *restored*, not from its last, so the
+moments belong to the decoder actually returned. It is held in memory only: `save`
+excludes optimizer state, so a model read back from a checkpoint warns and falls
+back rather than silently measuring something different. A caller who lowered
+`config.decoder_lr` for the counting phase keeps that change — only the moments are
+carried across. Default `False` preserves the behaviour every earlier result was
+measured under.
+
+**Checkpoints written by 0.4.0 no longer load.** `restore_payload` splats the
+stored config into `BAEConfig`, so a format-5 file's `decoder_updates_per_iteration`
+is an unexpected keyword argument. The format is bumped to 6 and the loader
+refuses 5 by name. No migration is written: the setting no longer exists, so
+there is nothing to migrate it to, and a checkpoint is cheap to regenerate.
+
 ### [0.4.0] - 2026-08-12
 
 Three defaults change. No configuration fields are added or removed, and anyone

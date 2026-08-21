@@ -19,14 +19,28 @@ Each iteration runs these five steps, in this order:
 1. **Compute boosting targets.** Take one gradient step on the latent code
    itself: `z* = z - lr * ∂L/∂z`. This is functional gradient descent. `z*` is
    where the latent code *should* move to reduce reconstruction error.
-2. *(Optional)* residualize the targets against each other
-   (`disentanglement="leave_one_out"`).
+2. **Orthogonalize the targets** against each other
+   (`disentanglement="orthogonal"`, on by default since 0.5.0).
 3. **Reset the encoder weights to zero.**
 4. **Fit the encoder with {func}`~structboost.allboost`**, regressing `X` onto
    `z*`. This is the step that selects genes.
-5. **Update the decoder** with several minibatch AdamW steps.
+5. **Update the decoder** with one shuffled pass over the cells: `ceil(n_cells /
+   batch_size)` AdamW steps, every cell contributing to exactly one of them.
 
 Then check early stopping, and repeat.
+
+### Both halves see the same cells
+
+Step 5 is one full pass rather than a set number of steps, and that is deliberate.
+Steps 1 and 4 are **full-batch**: `z*` is computed on every cell, and the encoder
+is re-solved from zero against every cell, at every iteration. A fixed decoder
+step count would make the two halves consume different amounts of data, by a
+factor that grows with the dataset — at the old default of 10 steps of 512 the
+decoder saw every cell below 5,120 cells, 31% at 16,000 and 5% at 100,000.
+
+`batch_size` is therefore the only dial here, and it now does two jobs: minibatch
+size, and how many steps a pass takes. Lower it for more, noisier steps; raise it
+for fewer, cheaper ones. See {doc}`../tasks/fitting`.
 
 ### Why the encoder is reset every iteration
 
