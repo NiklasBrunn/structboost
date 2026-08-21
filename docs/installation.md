@@ -21,13 +21,16 @@ pip install "structboost[bae,plot]"
 ```
 
 :::{note}
-`structboost` is not on PyPI yet. Until it is, install from source (below) or
-from TestPyPI:
+Pre-releases are published to **TestPyPI only**, so a version such as `0.6.0rc1`
+never occupies a number on PyPI. To install one:
 
 ```bash
 pip install --index-url https://test.pypi.org/simple/ \
             --extra-index-url https://pypi.org/simple/ "structboost[bae]"
 ```
+
+The `--extra-index-url` is required: TestPyPI does not carry the dependencies, so
+pip needs PyPI to resolve torch and the rest.
 :::
 
 ## From source
