@@ -1570,12 +1570,19 @@ def plot_dimension_correlation(
     if annotate is None:
         annotate = n <= 12
     if annotate:
-        # Ink chosen against the cell it sits on, not a constant: mid-range cells of
-        # a diverging map are pale and dark text reads, the ends are saturated.
+        # Ink chosen from the cell's actual luminance, not from a threshold on the
+        # value. A threshold has to assume how the colour map runs, and the two used
+        # here run oppositely: the diverging map is palest in the middle and
+        # saturated at both ends, viridis darkens monotonically toward zero. One
+        # rule cannot serve both, and a user-supplied `cmap` could be anything.
         for i in range(n):
             for j in range(n):
                 v = shown[i, j]
-                strong = (v > 0.55) if absolute else (abs(v) > 0.55)
+                r, g, b, _ = im.cmap(im.norm(v))
+                lin = [
+                    c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in (r, g, b)
+                ]
+                luminance = 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
                 ax.text(
                     j,
                     i,
@@ -1583,8 +1590,9 @@ def plot_dimension_correlation(
                     ha="center",
                     va="center",
                     fontsize=_TICK - 1,
-                    color="white" if strong else _INK,
+                    color="white" if luminance < 0.4 else _INK,
                 )
+
     off = shown[~np.eye(n, dtype=bool)] if n > 1 else np.zeros(0)
     worst = float(np.abs(off).max()) if off.size else 0.0
     what = "|r|" if absolute else "r"

@@ -472,3 +472,35 @@ def test_correlation_guards(kwargs, message):
     adata = _fitted(latent_dim=3)
     with pytest.raises(ValueError, match=message):
         plot_dimension_correlation(adata, **kwargs)
+
+
+def test_annotation_ink_is_readable_on_both_colour_maps():
+    """The two maps run oppositely -- diverging is palest in the middle, viridis
+    darkens toward zero -- so ink picked from a threshold on the *value* is
+    unreadable on one of them. It is picked from the cell's luminance instead.
+    """
+    _require_fit()
+    import matplotlib.colors as mcolors
+
+    from structboost import plot_dimension_correlation
+
+    def contrast(fg, bg):
+        def lum(c):
+            rgb = mcolors.to_rgb(c)
+            lin = [x / 12.92 if x <= 0.04045 else ((x + 0.055) / 1.055) ** 2.4 for x in rgb]
+            return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+        hi, lo = sorted((lum(fg), lum(bg)), reverse=True)
+        return (hi + 0.05) / (lo + 0.05)
+
+    adata = _fitted(latent_dim=4)
+    for kwargs in ({}, {"absolute": True}):
+        fig, ax = plot_dimension_correlation(adata, **kwargs)
+        image = ax.images[0]
+        assert ax.texts, "no annotations drawn"
+        for text in ax.texts:
+            cell = image.cmap(image.norm(float(text.get_text())))
+            assert contrast(text.get_color(), cell) >= 3.0, (
+                f"{text.get_text()} unreadable on its cell in {kwargs or 'signed'}"
+            )
+        fig.clf()
