@@ -1,0 +1,310 @@
+"""Tests for the per-dimension readout plots and the quantities behind them.
+
+The figures themselves are not asserted pixel by pixel -- that pins style rather
+than behaviour. What is pinned here is everything the docstrings *claim*: the
+variance decomposition is exact, the caller's AnnData is never mutated, the
+palette tiering is what it says, and every guard fires with a message that names
+the fix.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from structboost import gene_variance_shares, palette_audit
+
+
+def _require_plotting():
+    pytest.importorskip("matplotlib")
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+
+def _require_fit():
+    pytest.importorskip("torch")
+    pytest.importorskip("anndata")
+    _require_plotting()
+
+
+def _fitted(latent_dim=3, n_iter=8, seed=0):
+    """A small real fit, so the encoder is genuinely sparse and signed."""
+    from structboost import BAE, BAEConfig, sim_scrnaseq_anndata
+
+    adata = sim_scrnaseq_anndata(
+        n=150, n_genes=60, stageno=4, stagep=8, stageoverlap=2, hierarchy=None, seed=seed
+    )
+    model = BAE(
+        adata.n_vars,
+        BAEConfig(latent_dim=latent_dim, boosting_stepno=10, seed=seed),
+    )
+    model.fit(adata, max_iterations=n_iter, verbose=False)
+    adata.obs["group"] = np.where(np.arange(adata.n_obs) % 3 == 0, "a", "b")
+    return adata
+
+
+# --- the variance decomposition --------------------------------------------
+
+
+def test_gene_variance_shares_sum_to_one():
+    """The identity the gene ranking rests on: Var(s) = sum_g w_g Cov(X_g, s)."""
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(200, 12))
+    w = rng.normal(size=12)
+    shares = gene_variance_shares(X, w, X @ w)
+    assert shares.sum() == pytest.approx(1.0, abs=1e-10)
+
+
+def test_gene_variance_shares_ignore_genes_outside_the_score():
+    """A gene with zero weight contributes exactly nothing, however it varies."""
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(200, 6))
+    w = np.array([1.0, -2.0, 0.0, 0.5, 0.0, 3.0])
+    shares = gene_variance_shares(X, w, X @ w)
+    assert shares[2] == 0.0
+    assert shares[4] == 0.0
+    assert shares.sum() == pytest.approx(1.0, abs=1e-10)
+
+
+def test_gene_variance_shares_is_a_magnitude_not_a_direction():
+    """A negative-weight gene still earns a positive share.
+
+    `share = w * Cov(X_g, s)`, and a negative-weight gene is anti-correlated with
+    the score, so the product is positive either way. Direction lives in the sign
+    of the weight -- which is why the plots colour gene names by `w` and print the
+    share without a sign.
+    """
+    rng = np.random.default_rng(2)
+    X = rng.normal(size=(400, 4))
+    w = np.array([-1.0, -2.0, -0.5, -3.0])
+    shares = gene_variance_shares(X, w, X @ w)
+    assert (w < 0).all()
+    assert (shares > 0).all()
+
+
+def test_gene_variance_shares_handles_a_dead_dimension():
+    """A dimension with no variance has no shares to compute, and must not divide."""
+    X = np.random.default_rng(3).normal(size=(50, 4))
+    shares = gene_variance_shares(X, np.zeros(4), np.zeros(50))
+    assert np.all(shares == 0.0)
+
+
+# --- palettes ---------------------------------------------------------------
+
+
+def test_palette_audit_reports_the_documented_fields():
+    audit = palette_audit("tab5")
+    assert set(audit) == {
+        "n",
+        "min_de_normal",
+        "min_de_cvd",
+        "min_contrast",
+        "n_below_contrast_floor",
+    }
+    assert audit["n"] == 5
+
+
+def test_palette_tiers_have_the_documented_sizes():
+    from structboost._plotting import _palette_for
+
+    assert len(_palette_for(2)) == 5
+    assert len(_palette_for(5)) == 5
+    assert len(_palette_for(6)) == 10
+    assert len(_palette_for(10)) == 10
+    assert len(_palette_for(11)) == 20
+    assert len(_palette_for(50)) == 20
+
+
+def test_small_tier_is_a_prefix_of_the_larger_one():
+    """A sixth group must not recolour the first five."""
+    from structboost._plotting import _PALETTE_5, _PALETTE_10
+
+    assert _PALETTE_10[: len(_PALETTE_5)] == _PALETTE_5
+
+
+def test_safe_palette_clears_the_bars_it_claims():
+    """The only tier documented as passing: >= 8 dE under CVD, >= 3.0 contrast."""
+    audit = palette_audit("safe")
+    assert audit["min_de_cvd"] >= 8.0
+    assert audit["n_below_contrast_floor"] == 0
+
+
+# --- plot_latent_dimensions -------------------------------------------------
+
+
+def test_plot_latent_dimensions_shape_and_panels():
+    _require_fit()
+    from structboost import plot_latent_dimensions
+
+    adata = _fitted()
+    fig, axes = plot_latent_dimensions(adata, dims=[0, 2], group_by="group")
+    assert axes.shape == (2, 3)
+    fig.clf()
+
+
+def test_groups_panel_is_dropped_without_a_grouping():
+    """An ungrouped violin is the score panel rotated, so it is not drawn."""
+    _require_fit()
+    from structboost import plot_latent_dimensions
+
+    adata = _fitted()
+    fig, axes = plot_latent_dimensions(adata, dims=[0])
+    assert axes.shape == (1, 2)
+    fig.clf()
+
+
+def test_weights_panel_is_available():
+    _require_fit()
+    from structboost import plot_latent_dimensions
+
+    adata = _fitted()
+    fig, axes = plot_latent_dimensions(
+        adata, dims=[0], panels=("scores", "contributions", "weights")
+    )
+    assert axes.shape == (1, 3)
+    fig.clf()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"panels": ("groups",)}, "no panels to draw"),
+        ({"dims": [99]}, "out of range"),
+        ({"panels": ("nonsense",)}, "unknown panels"),
+        ({"group_by": "group", "palette": "nope"}, "unknown palette"),
+        ({"group_by": "absent"}, "absent"),
+    ],
+)
+def test_plot_latent_dimensions_guards(kwargs, message):
+    _require_fit()
+    from structboost import plot_latent_dimensions
+
+    adata = _fitted()
+    with pytest.raises((ValueError, KeyError), match=message):
+        plot_latent_dimensions(adata, **kwargs)
+
+
+def test_missing_latent_key_names_the_fix():
+    _require_fit()
+    from structboost import plot_latent_dimensions
+
+    adata = _fitted()
+    del adata.obsm["X_bae"]
+    with pytest.raises(KeyError, match="fit the model first"):
+        plot_latent_dimensions(adata, dims=[0])
+
+
+def test_score_panel_draw_order_is_seeded_not_arbitrary():
+    """The shuffle exists to stop one group winning every overlap; it must still be
+    reproducible, or the same call gives two different figures."""
+    _require_fit()
+    from structboost import plot_latent_dimensions
+
+    adata = _fitted()
+
+    def offsets(seed):
+        fig, axes = plot_latent_dimensions(
+            adata, dims=[0], group_by="group", panels=("scores",), seed=seed
+        )
+        data = axes[0][0].collections[0].get_offsets().data.copy()
+        fig.clf()
+        return data
+
+    assert np.array_equal(offsets(0), offsets(0))
+    assert not np.array_equal(offsets(0), offsets(1))
+
+
+def test_shuffling_does_not_move_any_point():
+    """Only the paint order is permuted: the set of (rank, score) pairs is fixed,
+    so the curve is identical whatever the seed."""
+    _require_fit()
+    from structboost import plot_latent_dimensions
+
+    adata = _fitted()
+
+    def sorted_points(seed):
+        fig, axes = plot_latent_dimensions(
+            adata, dims=[0], group_by="group", panels=("scores",), seed=seed
+        )
+        pts = axes[0][0].collections[0].get_offsets().data.copy()
+        fig.clf()
+        return pts[np.lexsort((pts[:, 1], pts[:, 0]))]
+
+    assert np.allclose(sorted_points(0), sorted_points(5))
+
+
+# --- plot_dimension_gene_umaps ----------------------------------------------
+
+
+def _with_embedding(adata):
+    adata.obsm["X_umap"] = np.random.default_rng(0).normal(size=(adata.n_obs, 2))
+    return adata
+
+
+def test_gene_umaps_shape_includes_the_score_column():
+    _require_fit()
+    pytest.importorskip("scanpy")
+    from structboost import plot_dimension_gene_umaps
+
+    adata = _with_embedding(_fitted())
+    fig, axes = plot_dimension_gene_umaps(adata, dims=[0, 1], n_genes=3, scale="none")
+    assert axes.shape == (2, 4)
+    fig.clf()
+
+
+def test_gene_umaps_do_not_mutate_the_callers_anndata():
+    """Panels are assembled into a throwaway AnnData; writing temp columns into the
+    caller's object would leave debris if anything raised midway."""
+    _require_fit()
+    pytest.importorskip("scanpy")
+    from structboost import plot_dimension_gene_umaps
+
+    adata = _with_embedding(_fitted())
+    before_obs = list(adata.obs.columns)
+    before_obsm = sorted(adata.obsm)
+    fig, _ = plot_dimension_gene_umaps(adata, dims=[0], n_genes=2, scale="none")
+    fig.clf()
+    assert list(adata.obs.columns) == before_obs
+    assert sorted(adata.obsm) == before_obsm
+
+
+def test_gene_umaps_require_an_embedding_and_say_how_to_get_one():
+    _require_fit()
+    pytest.importorskip("scanpy")
+    from structboost import plot_dimension_gene_umaps
+
+    adata = _fitted()
+    with pytest.raises(KeyError, match="sc.pp.neighbors"):
+        plot_dimension_gene_umaps(adata, dims=[0])
+
+
+def test_log1p_refuses_already_scaled_expression():
+    """`adata.X` is z-scored under this package's contract, so the default scale
+    would otherwise colour by log1p of negative values."""
+    _require_fit()
+    pytest.importorskip("scanpy")
+    from structboost import plot_dimension_gene_umaps
+
+    adata = _with_embedding(_fitted())
+    with pytest.raises(ValueError, match="scale='none'"):
+        plot_dimension_gene_umaps(adata, dims=[0], scale="log1p")
+
+
+def test_display_values_transforms():
+    from structboost._plotting import _display_values
+
+    x = np.array([0.0, 1.0, 3.0])
+    assert np.allclose(_display_values(x, "none"), x)
+    assert np.allclose(_display_values(x, "log1p"), np.log1p(x))
+    z = _display_values(x, "zscore")
+    assert z.mean() == pytest.approx(0.0, abs=1e-12)
+    with pytest.raises(ValueError, match="unknown scale"):
+        _display_values(x, "bogus")
+
+
+def test_zscore_of_a_constant_gene_does_not_divide_by_zero():
+    from structboost._plotting import _display_values
+
+    out = _display_values(np.full(10, 2.5), "zscore")
+    assert np.all(out == 0.0)
