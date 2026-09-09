@@ -50,6 +50,19 @@ support, and neither stability mode gives you usable error control.
 {class}`~structboost.StabilitySelectionResult`,
 {meth}`BAE.apply_encoder <structboost.BAE.apply_encoder>`
 
+### Reading a fitted model, dimension by dimension
+
+Whether a dimension is a gradient or a subgroup, which genes build it and at
+which end, which cells sit there, and whether two dimensions are the same thing.
+Genes are ranked by their exact share of the dimension's variance rather than by
+coefficient size.
+
+→ {doc}`tasks/reading-dimensions`,
+{func}`~structboost.plot_latent_dimensions`,
+{func}`~structboost.plot_dimension_gene_umaps`,
+{func}`~structboost.plot_dimension_correlation`,
+{func}`~structboost.gene_variance_shares`
+
 ### Handling batches and unwanted covariates
 
 Name the covariate once with `batch_key`, and `batch_integration_mode` decides
@@ -195,6 +208,7 @@ concepts/reading-quality
 
 tasks/fitting
 tasks/gene-selection
+tasks/reading-dimensions
 tasks/batch-integration
 tasks/transfer
 tasks/interpreting
