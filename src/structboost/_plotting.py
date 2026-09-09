@@ -533,6 +533,16 @@ def _elide(text, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _plural(n: int, singular: str, plural: str | None = None) -> str:
+    """`n` with a correctly inflected noun.
+
+    Both counts here can legitimately be 1 -- a dimension can select a single gene,
+    and the grey fold can be one group deep -- so "1 genes selected" is reachable
+    rather than hypothetical.
+    """
+    return f"{n} {singular if n == 1 else (plural or singular + 's')}"
+
+
 def _point_size(n_cells: int) -> float:
     """Marker size for the score panel, larger on smaller datasets.
 
@@ -1083,7 +1093,7 @@ def plot_latent_dimensions(
                 markersize=8,
                 markeredgecolor="none",
                 markerfacecolor=_OTHER,
-                label=f"{n_grey} further groups (labelled in the violins)",
+                label=(f"{_plural(n_grey, 'further group')} (labelled in the violins)"),
             )
         )
     handles = handles + split_key
@@ -1355,7 +1365,7 @@ def plot_dimension_gene_umaps(
                 ax.text(
                     0.5,
                     1.0,
-                    f"{n_selected.get(dim, 0)} genes selected",
+                    f"{_plural(n_selected.get(dim, 0), 'gene')} selected",
                     transform=ax.transAxes,
                     ha="center",
                     va="bottom",

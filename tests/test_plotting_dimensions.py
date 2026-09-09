@@ -351,3 +351,30 @@ def test_non_gene_panels_keep_muted_labels():
     colours = {t.get_color().upper() for t in axes[0][2].get_yticklabels()}
     assert colours == {_MUTED.upper()}
     fig.clf()
+
+
+@pytest.mark.parametrize(
+    ("n", "expected"),
+    [(0, "0 genes"), (1, "1 gene"), (2, "2 genes")],
+)
+def test_counts_are_inflected(n, expected):
+    """Both counts these serve can legitimately be 1 -- a dimension can select a
+    single gene, and the grey fold can be one group deep."""
+    from structboost._plotting import _plural
+
+    assert _plural(n, "gene") == expected
+
+
+def test_grey_fold_legend_entry_is_inflected():
+    """The entry naming the groups that lost their hue read '1 further groups'."""
+    _require_fit()
+    from structboost import plot_latent_dimensions
+
+    adata = _fitted()
+    # eight groups against a seven-hue palette leaves exactly one folded to grey
+    adata.obs["many"] = [f"g{i % 8}" for i in range(adata.n_obs)]
+    fig, _ = plot_latent_dimensions(adata, dims=[0], group_by="many", palette="safe", max_groups=8)
+    labels = [t.get_text() for t in fig.legends[0].get_texts()]
+    folded = [t for t in labels if "further group" in t]
+    assert folded == ["1 further group (labelled in the violins)"], labels
+    fig.clf()
