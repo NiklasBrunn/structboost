@@ -56,9 +56,14 @@ __all__ = [
     "encode_obs_covariates",
     "export_interactive_html",
     "extract_gene_rankings",
+    "gene_variance_shares",
     "linear_ceiling",
     "looks_like_ensembl",
+    "palette_audit",
     "plot_boosting_coefficient_paths",
+    "plot_dimension_correlation",
+    "plot_dimension_gene_umaps",
+    "plot_latent_dimensions",
     "plot_top_boosting_coefficients",
     "plot_training_diagnostics",
     "read_encoder_weights",
@@ -70,9 +75,17 @@ __all__ = [
     "write_encoder_weights",
 ]
 
+#: Resolved lazily through `__getattr__`. `gene_variance_shares` and
+#: `palette_audit` live in `_plotting` beside their callers but need no
+#: matplotlib -- that module imports it inside the drawing functions only.
 _PLOT_FUNCTIONS = frozenset(
     {
+        "gene_variance_shares",
+        "palette_audit",
         "plot_boosting_coefficient_paths",
+        "plot_dimension_correlation",
+        "plot_dimension_gene_umaps",
+        "plot_latent_dimensions",
         "plot_top_boosting_coefficients",
         "plot_training_diagnostics",
     }

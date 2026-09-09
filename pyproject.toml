@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "structboost"
-version = "0.5.0"
+version = "0.6.0"
 description = "Boosting Autoencoders (BAE) and componentwise L2 boosting utilities for scverse-style workflows."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -40,6 +40,16 @@ bae = [
 # Lightweight plotting helpers (imported lazily)
 plot = [
   "matplotlib>=3.7",
+]
+# scanpy, for `plot_dimension_gene_umaps` alone. It draws through `sc.pl.umap` so
+# its panels match a scanpy figure rather than approximating one, and it is
+# imported inside that function: without it the function raises naming
+# `plot_latent_dimensions` as the matplotlib-only alternative, and nothing else in
+# the package notices. Kept out of `plot` deliberately -- scanpy pulls a far larger
+# tree than matplotlib, and the other plot functions do not need it.
+scanpy = [
+  "scanpy>=1.9",
+  "structboost[plot]",
 ]
 # Parquet encoder-weight files (imported lazily; CSV needs only pandas)
 io = [

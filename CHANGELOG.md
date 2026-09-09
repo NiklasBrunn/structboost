@@ -3,6 +3,100 @@
 Releases follow [semantic versioning](https://semver.org). While the project is
 pre-1.0, a minor bump may break API.
 
+### [0.6.0] - 2026-09-09
+
+**Not breaking.** Nothing existing changes behaviour; this adds a way to read a
+fitted model.
+
+**New `plot_latent_dimensions`: one row per latent dimension, up to three
+panels.** The sorted score curve, the per-gene contribution distributions, and
+the scores split by a grouping you name. It exists because a fitted BAE has been
+readable in principle — the encoder *is* the gene list — and awkward in practice:
+`extract_gene_rankings` gives ranked lists, `export_interactive_html` gives an
+explorer, and neither says whether a dimension describes a subgroup or a
+gradient, nor which cells sit at which end.
+
+**New `plot_dimension_gene_umaps`: a UMAP grid, dimensions by top genes**, drawn
+through `scanpy.pl.umap` so the panels match a scanpy figure. It answers the one
+question the other panels structurally cannot — whether a dimension's genes light
+up the *same* cells — because both the score curve and the contribution violins
+have already summed over cells. On real data it separates a coherent programme
+from a dimension summing unrelated signals.
+
+**A `"shares"` panel and a new `plot_dimension_correlation`.** The contribution
+panel shows a dimension's top handful of genes; the shares panel plots *every*
+selected gene's share, sorted, which is the only view that says whether a
+dimension rests on three genes or spreads evenly over forty — both legitimate,
+and read differently. Ordering it by `rank_by="weight"` while the axis stays on
+the share draws the disagreement between the two rankings directly.
+
+The correlation heatmap answers a question no per-dimension panel can: whether
+two dimensions are near-duplicates, and therefore whether they can be read as two
+findings or one. Pearson by default, Spearman on tie-averaged ranks as an option —
+ties are not incidental here, since a sparse encoder leaves many cells at exactly
+one value on a subgroup dimension. Signed values get the diverging map centred on
+zero; `absolute=True` plots `|r|` with a sequential one, since a magnitude has no
+midpoint.
+
+**Genes are ranked by variance share, not `|weight|`,** exposed as the new
+`gene_variance_shares`. From `Var(s) = Cov(s, s)` with `s = X @ w` it follows
+that `w_g Cov(X_g, s) / Var(s)` decomposes a dimension's variance exactly and
+sums to 1, needing no orthogonality assumption and splitting credit correctly
+between correlated genes. The weight alone ignores how much a gene actually
+varies: measured on 59k PBMCs the two rankings agree on 8.6 of 10 genes per
+dimension, and where they differ `|w|` promotes genes that barely move — SCT
+ranked #4 by weight and #35 of 38 by share, being near-absent in that tissue.
+The share is a **magnitude**: because a negative-weight gene is anti-correlated
+with the score, the product is positive either way and only ~1% of genes come out
+negative. Direction is therefore the weight's sign, carried by the colour of the
+gene name, and the share prints without one.
+
+**The score panel paints in a seeded random order.** Markers are wider than the
+spacing between adjacent ranks — about 112 cells overlap at a given x on 59k —
+so whatever is drawn last wins every overlap. Painting in score order hands each
+contest to the higher-scoring cell, and since score correlates with group, one
+group systematically covers its neighbours. Every point keeps its own
+`(rank, score)`, so the curve is unchanged and only the paint order is permuted.
+This is the *opposite* choice from a UMAP panel, where rare groups are drawn last
+on purpose: there position is data and overlap is unavoidable, here every cell
+has its own x and any deterministic order is a bias.
+
+**Seven hues, then grey, and the palette is measured rather than chosen** — see
+the new `palette_audit`. The package's existing Okabe-Ito set separates colours
+from each other under colour-blindness but does not hold contrast against white
+at small mark sizes: its `#F0E442` measures 1.32 WCAG contrast against a floor of
+3.0, so a cell type holding 5.9% of cells was invisible as 8pt dots while its
+violin read perfectly well. **Contrast requirements scale with mark size, so a
+palette validated on one mark is not validated on another.** At twelve hues
+nothing separates anyway — 1.5 ΔE under simulated deuteranopia against a target
+of 8; Kelly's "20 colours of maximum contrast" reaches 0.4, scanpy's `default_20`
+0.5. Twenty reliably distinguishable hues do not exist. The default therefore
+follows the group count (`tab10`'s first five, then `tab10`, then scanpy's
+`default_20`), groups past the palette are grey, and they lose nothing because
+the violin panel labels every row — the score panel, which has no labels, is
+where the cap binds.
+
+**Signed quantities get a diverging map centred on zero; sequential is for
+magnitudes.** The score always, and the gene panels as soon as `scale="zscore"`,
+where a sequential map would put its neutral colour at the data mean rather than
+at zero. The encoder is bias-free, so zero is a real level — no selected gene
+departs from its mean in that cell — and the point at which a dimension's sign
+flips.
+
+`scanpy` becomes a new optional extra, needed only by `plot_dimension_gene_umaps`
+and imported inside it. Absent, that one function raises naming
+`plot_latent_dimensions` as the matplotlib-only alternative; everything else is
+unaffected.
+
+Two things are deliberately *not* offered. `c_ig / score_ik`, the intuitive
+"fraction of this cell's score", is unusable: the flat plateau of a subgroup
+dimension is exactly the cells whose score is ≈0, so the ratio diverges (measured
+−8,921 to +1,191 for one gene), flips sign with the score, and inflates without
+bound wherever contributions cancel — `normalize="cell"` divides by total
+*absolute* contribution instead, which is bounded. And nothing here is
+inferential: every number is an exact algebraic decomposition or a descriptive
+statistic.
+
 ### [0.5.0] - 2026-08-21
 
 **Breaking**, in two parts: the decoder update became one pass over the cells,
