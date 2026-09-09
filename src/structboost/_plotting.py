@@ -1098,7 +1098,7 @@ def plot_latent_dimensions(
             handletextpad=0.5,
             columnspacing=1.6,
             labelspacing=0.7,
-            bbox_to_anchor=(0.5, 1.0 + 0.95 / fig_size[1]),
+            bbox_to_anchor=(0.5, 1.0 + 1.45 / fig_size[1]),
         )
     # No tight_layout: the explicit gridspec spacing above is the intent, and
     # tight_layout both overrides it and warns about the figure-level legend.
