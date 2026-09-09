@@ -378,3 +378,97 @@ def test_grey_fold_legend_entry_is_inflected():
     folded = [t for t in labels if "further group" in t]
     assert folded == ["1 further group (labelled in the violins)"], labels
     fig.clf()
+
+
+# --- the shares panel and the correlation heatmap ---------------------------
+
+
+def test_shares_panel_draws_every_selected_gene():
+    """The contribution panel shows the top handful; this one shows all of them,
+    which is what says whether a dimension rests on three genes or forty."""
+    _require_fit()
+    import numpy as np
+
+    from structboost import plot_latent_dimensions
+
+    adata = _fitted()
+    n_selected = int((np.asarray(adata.varm["BAE_encoder_weights"])[:, 0] != 0).sum())
+    fig, axes = plot_latent_dimensions(adata, dims=[0], panels=("scores", "shares"))
+    drawn = axes[0][1].collections[0].get_offsets().data
+    assert drawn.shape[0] == n_selected
+    fig.clf()
+
+
+def test_shares_panel_is_sorted_and_respects_rank_by():
+    _require_fit()
+    import numpy as np
+
+    from structboost import plot_latent_dimensions
+
+    adata = _fitted()
+
+    def y_of(rank_by):
+        fig, axes = plot_latent_dimensions(adata, dims=[0], panels=("shares",), rank_by=rank_by)
+        y = axes[0][0].collections[0].get_offsets().data[:, 1].copy()
+        fig.clf()
+        return y
+
+    by_share = y_of("share")
+    assert np.all(np.diff(by_share) >= -1e-12), "ordering by share must be monotone"
+    # same values, different order: the y axis stays the share either way
+    assert np.allclose(np.sort(by_share), np.sort(y_of("weight")))
+
+
+def test_correlation_heatmap_shape_and_diagonal():
+    _require_fit()
+    import numpy as np
+
+    from structboost import plot_dimension_correlation
+
+    adata = _fitted(latent_dim=4)
+    fig, ax = plot_dimension_correlation(adata)
+    image = ax.images[0].get_array()
+    assert image.shape == (4, 4)
+    assert np.allclose(np.diag(image), 1.0)
+    fig.clf()
+
+
+def test_spearman_is_pearson_on_tie_averaged_ranks():
+    """Ties matter: a sparse encoder can leave many cells at exactly one value."""
+    import numpy as np
+
+    from structboost._plotting import _average_ranks
+
+    x = np.array([[3.0, 1.0], [1.0, 2.0], [1.0, 3.0], [2.0, 4.0]])
+    ranks = _average_ranks(x)
+    # the two tied 1.0s share ranks 1 and 2, so both become 1.5
+    assert np.allclose(ranks[:, 0], [4.0, 1.5, 1.5, 3.0])
+
+
+def test_absolute_and_signed_use_different_colour_maps():
+    """A signed correlation is diverging about zero; a magnitude is sequential."""
+    _require_fit()
+    from structboost import plot_dimension_correlation
+
+    adata = _fitted(latent_dim=3)
+    signed, ax_s = plot_dimension_correlation(adata)
+    absolute, ax_a = plot_dimension_correlation(adata, absolute=True)
+    assert ax_s.images[0].get_clim() == (-1.0, 1.0)
+    assert ax_a.images[0].get_clim() == (0.0, 1.0)
+    assert ax_a.images[0].get_cmap().name == "viridis"
+    assert ax_s.images[0].get_cmap().name != "viridis"
+    signed.clf()
+    absolute.clf()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [({"method": "kendall"}, "unknown method"), ({"dims": [99]}, "out of range")],
+)
+def test_correlation_guards(kwargs, message):
+    _require_fit()
+    from structboost import plot_dimension_correlation
+
+    adata = _fitted(latent_dim=3)
+    with pytest.raises(ValueError, match=message):
+        plot_dimension_correlation(adata, **kwargs)

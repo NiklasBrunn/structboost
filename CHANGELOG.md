@@ -23,6 +23,21 @@ up the *same* cells — because both the score curve and the contribution violin
 have already summed over cells. On real data it separates a coherent programme
 from a dimension summing unrelated signals.
 
+**A `"shares"` panel and a new `plot_dimension_correlation`.** The contribution
+panel shows a dimension's top handful of genes; the shares panel plots *every*
+selected gene's share, sorted, which is the only view that says whether a
+dimension rests on three genes or spreads evenly over forty — both legitimate,
+and read differently. Ordering it by `rank_by="weight"` while the axis stays on
+the share draws the disagreement between the two rankings directly.
+
+The correlation heatmap answers a question no per-dimension panel can: whether
+two dimensions are near-duplicates, and therefore whether they can be read as two
+findings or one. Pearson by default, Spearman on tie-averaged ranks as an option —
+ties are not incidental here, since a sparse encoder leaves many cells at exactly
+one value on a subgroup dimension. Signed values get the diverging map centred on
+zero; `absolute=True` plots `|r|` with a sequential one, since a magnitude has no
+midpoint.
+
 **Genes are ranked by variance share, not `|weight|`,** exposed as the new
 `gene_variance_shares`. From `Var(s) = Cov(s, s)` with `s = X @ w` it follows
 that `w_g Cov(X_g, s) / Var(s)` decomposes a dimension's variance exactly and

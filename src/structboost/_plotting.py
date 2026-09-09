@@ -387,7 +387,7 @@ _TICK, _LABEL, _TITLE, _LEGEND = 9.0, 9.5, 10.5, 11.0
 #: of points draws a shape the data does not support.
 _MIN_GROUP = 10
 #: Relative panel widths, so a three-panel row still reads.
-_WIDTH = {"scores": 1.35, "contributions": 1.0, "weights": 0.8, "groups": 1.0}
+_WIDTH = {"scores": 1.35, "contributions": 1.0, "weights": 0.8, "shares": 1.0, "groups": 1.0}
 
 
 def _palette_for(n_groups: int) -> tuple[str, ...]:
@@ -776,6 +776,41 @@ def _draw_weights(ax, w, names, rank, n_genes) -> str:
     return "x"
 
 
+def _draw_shares(ax, shares, weights, sort_by, n_genes) -> str:
+    """Every selected gene's share of the dimension, as a sorted profile.
+
+    The contribution panel shows the top handful; this shows *all* of them, which
+    is the only view that says whether a dimension rests on three genes or spreads
+    evenly over forty. Both are legitimate and read differently -- a concentrated
+    dimension is a marker programme, a flat one a diffuse signature -- and the
+    shares sum to 1 either way, so the shape is the message.
+
+    ``sort_by="weight"`` keeps the y axis on the share but orders by coefficient,
+    which draws the disagreement between the two rankings directly: a monotone
+    curve means they agree, and a ragged one means large coefficients sitting on
+    genes that move no cells.
+    """
+    order = np.argsort(np.abs(weights) if sort_by == "weight" else shares)
+    y = shares[order]
+    x = np.arange(y.size)
+    ax.axhline(0.0, color=_FAINT, lw=0.8, zorder=0)
+    ax.scatter(
+        x, y, s=26, linewidths=0, zorder=3, c=[_POS if weights[i] >= 0 else _NEG for i in order]
+    )
+    ax.set_xlim(-0.6, max(y.size - 0.4, 1.0))
+    key = "|weight|" if sort_by == "weight" else "share"
+    ax.set_xlabel(f"selected genes, ordered by {key}", fontsize=_LABEL, color=_MUTED)
+    ax.set_ylabel("share of variance", fontsize=_LABEL, color=_MUTED)
+    top = float(np.sort(shares)[::-1][:n_genes].sum())
+    ax.set_title(
+        f"{_plural(y.size, 'gene')} · top {n_genes} hold {top:.0%}",
+        fontsize=_TITLE,
+        loc="left",
+        color=_INK,
+    )
+    return "y"
+
+
 def _draw_groups(ax, z, labels, keep, lut, group_by) -> str:
     groups = [g for g in keep if (labels == g).sum() >= _MIN_GROUP]
     groups.sort(key=lambda g: float(np.median(z[labels == g])))
@@ -843,6 +878,13 @@ def plot_latent_dimensions(
 
     ``"weights"``
         The raw coefficients. Available, not default.
+
+    ``"shares"``
+        Every selected gene's share of the dimension's variance, sorted -- the
+        whole profile rather than the top handful, which is what says whether a
+        dimension rests on three genes or spreads evenly over forty. Obeys
+        ``rank_by``: ordering by ``"weight"`` while plotting the share exposes
+        genes carrying a large coefficient that move no cells.
 
     ``"groups"``
         The same scores split by ``group_by``, violins ordered by median. Dropped
@@ -933,7 +975,7 @@ def plot_latent_dimensions(
         raise ValueError(f"dims out of range for a {Z.shape[1]}-dimensional code: {dims}")
 
     X = W = names = None
-    if {"contributions", "weights"} & set(panels):
+    if {"contributions", "weights", "shares"} & set(panels):
         if weights_key not in adata.varm:
             raise KeyError(f"adata.varm[{weights_key!r}] not found; needed for gene panels")
         W = np.asarray(adata.varm[weights_key], dtype=np.float64)
@@ -974,7 +1016,7 @@ def plot_latent_dimensions(
     # the gene and group panels each need one tick per entry, and at a fixed height
     # their labels collide as soon as either exceeds about eight.
     rows_needed = max(
-        n_genes if {"contributions", "weights"} & set(panels) else 0,
+        n_genes if {"contributions", "weights", "shares"} & set(panels) else 0,
         max_groups if "groups" in panels else 0,
         6,
     )
@@ -1005,7 +1047,7 @@ def plot_latent_dimensions(
             ax = axes[row][col]
             if panel == "scores":
                 grid = _draw_scores(ax, z, colors, size, dim, rng)
-            elif panel in ("contributions", "weights"):
+            elif panel in ("contributions", "weights", "shares"):
                 w = W[:, dim]
                 nz = np.flatnonzero(w)
                 if nz.size == 0:
@@ -1029,6 +1071,8 @@ def plot_latent_dimensions(
                 rank = shares if rank_by == "share" else w[nz]
                 if panel == "weights":
                     grid = _draw_weights(ax, w[nz], names[nz], rank, n_genes)
+                elif panel == "shares":
+                    grid = _draw_shares(ax, shares, w[nz], rank_by, n_genes)
                 else:
                     active = None
                     if active_quantile is not None:
@@ -1401,3 +1445,156 @@ def plot_dimension_gene_umaps(
         color=_MUTED,
     )
     return fig, axes
+
+
+def _average_ranks(x: np.ndarray) -> np.ndarray:
+    """Ranks with ties averaged, column-wise. Spearman is Pearson on these.
+
+    Done here rather than through ``scipy.stats`` so this module keeps needing only
+    numpy and matplotlib; ties matter because a sparse encoder leaves many cells at
+    exactly zero on a subgroup dimension, and ordinal ranks would break those ties
+    arbitrarily and bias the correlation.
+    """
+    out = np.empty_like(x, dtype=np.float64)
+    for j in range(x.shape[1]):
+        col = x[:, j]
+        order = np.argsort(col, kind="mergesort")
+        ranks = np.empty(col.size, dtype=np.float64)
+        ranks[order] = np.arange(1, col.size + 1, dtype=np.float64)
+        # average the ranks within each run of equal values
+        srt = col[order]
+        start = 0
+        for stop in range(1, srt.size + 1):
+            if stop == srt.size or srt[stop] != srt[start]:
+                if stop - start > 1:
+                    ranks[order[start:stop]] = ranks[order[start:stop]].mean()
+                start = stop
+        out[:, j] = ranks
+    return out
+
+
+def plot_dimension_correlation(
+    adata,
+    *,
+    dims: Sequence[int] | None = None,
+    method: Literal["pearson", "spearman"] = "pearson",
+    absolute: bool = False,
+    latent_key: str = "X_bae",
+    annotate: bool | None = None,
+    cmap=None,
+    figsize: tuple[float, float] | None = None,
+    dpi: int = 150,
+):
+    """Heatmap of the correlation between latent dimensions.
+
+    Whether two dimensions are near-duplicates decides whether they can be read as
+    two findings or one, and nothing else in the readout answers it -- every other
+    panel looks at one dimension at a time.
+
+    It matters most when the fit does not enforce separation:
+    :class:`~structboost.BAEConfig` defaults ``disentanglement`` to
+    ``"orthogonal"``, and a fit that turns it off can carry two dimensions
+    describing the same programme with nothing else flagging it.
+
+    Parameters
+    ----------
+    adata
+        AnnData with a fitted BAE, or an ``(n_cells, n_dims)`` array of scores.
+    dims
+        Dimensions to include. ``None`` uses all.
+    method
+        ``"pearson"`` (default) or ``"spearman"``. Spearman is computed as Pearson
+        on tie-averaged ranks, which matters here: a sparse encoder leaves many
+        cells at exactly zero on a subgroup dimension.
+    absolute
+        Plot ``|r|`` instead of ``r``. Signed values get a diverging map centred on
+        zero, because the sign of a correlation is meaningful and a latent
+        dimension's own sign is arbitrary; absolute values are a magnitude and get
+        a sequential one.
+    annotate
+        Write each value into its cell. ``None`` annotates when there are at most
+        12 dimensions, beyond which the numbers stop fitting.
+    cmap
+        Override the colour map chosen by ``absolute``.
+    figsize, dpi
+        Overrides for the computed size, and the figure's resolution.
+
+    Returns
+    -------
+    fig, ax
+
+    Raises
+    ------
+    KeyError
+        If ``latent_key`` is missing from an AnnData input.
+    ValueError
+        If ``dims`` is out of range or ``method`` is unknown.
+
+    Examples
+    --------
+    >>> plot_dimension_correlation(adata, method="spearman")      # doctest: +SKIP
+    >>> plot_dimension_correlation(adata, absolute=True)          # doctest: +SKIP
+    """
+    import matplotlib.pyplot as plt
+
+    if hasattr(adata, "obsm"):
+        if latent_key not in adata.obsm:
+            raise KeyError(f"adata.obsm[{latent_key!r}] not found; fit the model first")
+        Z = np.asarray(adata.obsm[latent_key], dtype=np.float64)
+    else:
+        Z = np.asarray(adata, dtype=np.float64)
+    dims = list(range(Z.shape[1])) if dims is None else list(dims)
+    if any(d < 0 or d >= Z.shape[1] for d in dims):
+        raise ValueError(f"dims out of range for a {Z.shape[1]}-dimensional code: {dims}")
+    if method not in ("pearson", "spearman"):
+        raise ValueError(f"unknown method {method!r}; use 'pearson' or 'spearman'")
+
+    sub = Z[:, dims]
+    corr = np.corrcoef((_average_ranks(sub) if method == "spearman" else sub), rowvar=False)
+    corr = np.atleast_2d(corr)
+    shown = np.abs(corr) if absolute else corr
+
+    n = len(dims)
+    fig, ax = plt.subplots(figsize=figsize or (0.55 * n + 3.0, 0.55 * n + 2.2), dpi=dpi)
+    im = ax.imshow(
+        shown,
+        cmap=cmap if cmap is not None else ("viridis" if absolute else _score_cmap()),
+        vmin=0.0 if absolute else -1.0,
+        vmax=1.0,
+    )
+    ax.set_xticks(range(n), [str(d) for d in dims], fontsize=_TICK)
+    ax.set_yticks(range(n), [str(d) for d in dims], fontsize=_TICK)
+    ax.tick_params(color=_MUTED, labelcolor=_MUTED, length=3)
+    ax.set_xlabel("latent dimension", fontsize=_LABEL, color=_MUTED)
+    ax.set_ylabel("latent dimension", fontsize=_LABEL, color=_MUTED)
+    if annotate is None:
+        annotate = n <= 12
+    if annotate:
+        # Ink chosen against the cell it sits on, not a constant: mid-range cells of
+        # a diverging map are pale and dark text reads, the ends are saturated.
+        for i in range(n):
+            for j in range(n):
+                v = shown[i, j]
+                strong = (v > 0.55) if absolute else (abs(v) > 0.55)
+                ax.text(
+                    j,
+                    i,
+                    f"{v:.2f}",
+                    ha="center",
+                    va="center",
+                    fontsize=_TICK - 1,
+                    color="white" if strong else _INK,
+                )
+    off = shown[~np.eye(n, dtype=bool)] if n > 1 else np.zeros(0)
+    worst = float(np.abs(off).max()) if off.size else 0.0
+    what = "|r|" if absolute else "r"
+    ax.set_title(
+        f"{method.capitalize()} correlation between latent dimensions ({what})\n"
+        f"largest off-diagonal |r| = {worst:.2f}",
+        fontsize=_TITLE,
+        loc="left",
+        color=_INK,
+    )
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    return fig, ax
