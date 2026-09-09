@@ -1146,7 +1146,7 @@ def plot_dimension_gene_umaps(
 ):
     """A grid of UMAPs: one row per latent dimension, one column per top gene.
 
-    Drawn with :func:`scanpy.pl.umap`, so the panels match the rest of a scanpy
+    Drawn with ``scanpy.pl.umap``, so the panels match the rest of a scanpy
     figure, and ranked by the same quantity :func:`plot_latent_dimensions` uses.
     Reading across a row shows whether a dimension's genes light up the *same*
     cells -- a coherent programme -- or different ones, a dimension summing
