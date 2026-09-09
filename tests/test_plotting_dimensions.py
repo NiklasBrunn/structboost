@@ -308,3 +308,46 @@ def test_zscore_of_a_constant_gene_does_not_divide_by_zero():
 
     out = _display_values(np.full(10, 2.5), "zscore")
     assert np.all(out == 0.0)
+
+
+def test_gene_labels_are_coloured_by_the_sign_of_their_weight():
+    """Direction lives in the weight's sign, and the gene name's colour is where it
+    is shown -- the share beside it is a magnitude and carries none.
+
+    Regression: the shared styling used to call `tick_params(colors=...)` after the
+    panels had coloured their own labels, and `colors` sets marks *and* labels, so
+    every gene name came out muted.
+    """
+    _require_fit()
+    import numpy as np
+
+    from structboost import plot_latent_dimensions
+    from structboost._plotting import _NEG, _POS
+
+    adata = _fitted()
+    weights = np.asarray(adata.varm["BAE_encoder_weights"])
+    names = np.asarray(adata.var_names, dtype=str)
+    fig, axes = plot_latent_dimensions(
+        adata, dims=[0], panels=("scores", "contributions", "weights")
+    )
+    for ax in (axes[0][1], axes[0][2]):
+        labels = list(ax.get_yticklabels())
+        assert labels, "gene panel drew no labels"
+        for text in labels:
+            gene = text.get_text().split()[0]
+            w = float(weights[np.flatnonzero(names == gene)[0], 0])
+            assert text.get_color().upper() == (_POS if w >= 0 else _NEG).upper()
+    fig.clf()
+
+
+def test_non_gene_panels_keep_muted_labels():
+    """Only the gene panels carry the sign encoding; a grouping is not signed."""
+    _require_fit()
+    from structboost import plot_latent_dimensions
+    from structboost._plotting import _MUTED
+
+    adata = _fitted()
+    fig, axes = plot_latent_dimensions(adata, dims=[0], group_by="group")
+    colours = {t.get_color().upper() for t in axes[0][2].get_yticklabels()}
+    assert colours == {_MUTED.upper()}
+    fig.clf()

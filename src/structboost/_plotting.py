@@ -758,6 +758,9 @@ def _draw_weights(ax, w, names, rank, n_genes) -> str:
     _zero(ax, "x")
     ax.set_yticks(np.arange(order.size))
     ax.set_yticklabels([_elide(names[i], 20) for i in order], fontsize=_TICK)
+    # Gene name in the colour of its weight's sign, as in every other gene panel.
+    for label, i in zip(ax.get_yticklabels(), order, strict=True):
+        label.set_color(_POS if w[i] >= 0 else _NEG)
     ax.set_title("encoder weights", fontsize=_TITLE, loc="left", color=_INK)
     ax.set_xlabel("weight", fontsize=_LABEL, color=_MUTED)
     return "x"
@@ -1036,7 +1039,12 @@ def plot_latent_dimensions(
                 grid = _draw_groups(ax, z, labels, keep, lut, group_by)
             ax.spines[["top", "right"]].set_visible(False)
             ax.spines[["left", "bottom"]].set_color(_FAINT)
-            ax.tick_params(colors=_MUTED, labelsize=_TICK, length=3)
+            # `color`/`labelcolor`, not `colors`: the latter sets both and would
+            # overwrite the per-gene label colours the panels set below.
+            ax.tick_params(color=_MUTED, labelsize=_TICK, length=3)
+            ax.tick_params(axis="x", labelcolor=_MUTED)
+            if panel not in ("contributions", "weights"):
+                ax.tick_params(axis="y", labelcolor=_MUTED)
             ax.grid(axis=grid, color="#f2f2f2", lw=0.6)
             ax.set_axisbelow(True)
 
