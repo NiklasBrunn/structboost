@@ -198,6 +198,10 @@ class BAEConfig:
         exact on the constrained dimensions and the orthogonality between
         constrained and free dimensions becomes approximate.
 
+        A dict sets the strength per design variable, ``{"condition": 1.0,
+        "disease": 0.75}``; variables named in ``design_key`` but not in the
+        dict get ``1``. A float applies to every variable.
+
         **The range is ``[0, 1/target_optim_lr]``**, i.e. ``[0, 1]`` at the
         default step size: the factor left on the residual is ``1 - lr * lambda``,
         which is zero at ``1`` (the target becomes exactly the design-explained
@@ -330,7 +334,7 @@ class BAEConfig:
     disentanglement: Literal["none", "correlation", "orthogonal"] = "orthogonal"
     disentanglement_alpha: float = 1.0
     disentanglement_lambda: float = 1e-2
-    design_lambda: float = 1.0
+    design_lambda: float | dict[str, float] = 1.0
     # Target computation
     target_optim_lr: float = 1.0
     # Training parameters
@@ -383,8 +387,13 @@ class BAEConfig:
             0.0 <= self.disentanglement_alpha <= 1.0
         ):
             raise ValueError("disentanglement_alpha must be finite and in [0, 1]")
-        if not np.isfinite(self.design_lambda) or self.design_lambda < 0:
-            raise ValueError("design_lambda must be finite and >= 0")
+        lambdas = (
+            list(self.design_lambda.values())
+            if isinstance(self.design_lambda, dict)
+            else [self.design_lambda]
+        )
+        if any(not np.isfinite(lam) or lam < 0 for lam in lambdas):
+            raise ValueError("design_lambda must be finite and >= 0 (for every variable)")
         if self.decoder_weight_decay < 0:
             raise ValueError("decoder_weight_decay must be >= 0")
         if self.max_iterations < 1:

@@ -604,12 +604,26 @@ def allboost(
     # `beta_init` the residual is taken at the offset model rather than at zero --
     # otherwise the first selection step would re-fit signal the offset already
     # explains -- and that too batches into a single product.
-    if beta_init is None:
-        residuals = targetmat
+    # Leaders and followers go through separate products: a gemm's rounding
+    # depends on its width, and a leader must come out bitwise as it would
+    # without its followers, or the attribution would perturb the fit it explains.
+    leaders = selection_from == np.arange(k)
+    groups = [slice(None)] if leaders.all() else [np.flatnonzero(leaders), np.flatnonzero(~leaders)]
+    blocks = []
+    for idx in groups:
+        residuals = targetmat[:, idx]
+        if beta_init is not None:
+            residuals = residuals - sourcemat @ beta_init[idx].T
+        nom = (sourcemat.T @ residuals) / col_norms_sq[:, None]
+        blocks.append((idx, nom, np.einsum("ij,ij->j", residuals, residuals, dtype=np.float64)))
+    if len(blocks) == 1:
+        _, initial_nom, initial_residual_sq = blocks[0]
     else:
-        residuals = targetmat - sourcemat @ beta_init.T
-    initial_nom = (sourcemat.T @ residuals) / col_norms_sq[:, None]
-    initial_residual_sq = np.einsum("ij,ij->j", residuals, residuals, dtype=np.float64)
+        initial_nom = np.empty((p, k), dtype=np.result_type(*(nom for _, nom, _ in blocks)))
+        initial_residual_sq = np.empty(k, dtype=np.float64)
+        for idx, nom, residual_sq in blocks:
+            initial_nom[:, idx] = nom
+            initial_residual_sq[idx] = residual_sq
 
     # Initialize shared state (used if independent=False)
     if not independent:

@@ -280,6 +280,11 @@ def build_payload(model: BAE) -> dict[str, Any]:
         "design_encoding": _encode_encoding(model._design_encoding),
         "design_dims": _to_primitive(model._design_dims),
         "design_within": _to_primitive(model._design_within),
+        "design_columns": _to_primitive(model._design_columns),
+        "design_blocks": _to_primitive(model._design_blocks),
+        "design_lambdas": _to_primitive(model._design_lambdas),
+        "decompose_columns": _to_primitive(model._decompose_columns),
+        "decompose_within": _to_primitive(model._decompose_within),
         "encoder_components": _map_leaves(model._encoder_components, _tensor),
         "selection_trace": _map_leaves(model._selection_trace, _tensor),
         "selection_path": _map_leaves(model._selection_path, _tensor),
@@ -348,6 +353,27 @@ def restore_payload(cls: type[BAE], payload: dict[str, Any], device: Any) -> BAE
     model._design_dims = None if dims is None else np.asarray(dims, dtype=np.intp)
     within = payload.get("design_within")
     model._design_within = None if within is None else list(within)
+    columns = payload.get("design_columns")
+    model._design_columns = None if columns is None else list(columns)
+    blocks = payload.get("design_blocks")
+    model._design_blocks = (
+        None if blocks is None else {v: np.asarray(d, dtype=np.intp) for v, d in blocks.items()}
+    )
+    lambdas = payload.get("design_lambdas")
+    model._design_lambdas = None if lambdas is None else {v: float(x) for v, x in lambdas.items()}
+    if model._design_columns is None and model._design_encoding is not None:
+        # A checkpoint from before the block form carries one joint projection;
+        # it maps onto a single block only when it had a single variable.
+        obs_columns = list(model._design_encoding.obs_columns)
+        if len(obs_columns) == 1 and model._design_dims is not None:
+            model._design_columns = obs_columns
+            model._design_blocks = {obs_columns[0]: model._design_dims}
+            lam = payload["config"].get("design_lambda", 1.0)
+            model._design_lambdas = {obs_columns[0]: float(lam)}
+    columns = payload.get("decompose_columns")
+    model._decompose_columns = None if columns is None else list(columns)
+    within = payload.get("decompose_within")
+    model._decompose_within = None if within is None else list(within)
     model._encoder_components = _map_leaves(payload.get("encoder_components"), _array)
     model._selection_trace = _map_leaves(payload.get("selection_trace"), _array)
     model._selection_path = _map_leaves(payload.get("selection_path"), _array)
