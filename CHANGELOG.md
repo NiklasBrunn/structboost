@@ -166,7 +166,8 @@ cohort, where every COVID-19 donor is male, `design_key={"disease": [0], "sex":
 of the sex block, with the disease dimension alone still at within-cell-type
 AUROC 0.88; and the decomposition of the plain fit put the between-disease
 residual variance on the complement and interferon monocyte genes (C1QA/B/C,
-SOCS3, FCGR1A, CLEC4C), 0.17% of the residual against 99.3% within.
+SOCS3, FCGR1A, CLEC4C), 0.17% of the residual against 99.3% within, and flagged
+a quarter of the plain fit's boosting steps as decided by that variance.
 
 
 `plot_selection_trace` and `plot_selection_paths` gain `decided_by`, the part

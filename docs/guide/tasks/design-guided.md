@@ -374,6 +374,9 @@ variance sits between the conditions are the complement and interferon
 monocyte programme, C1QA, C1QB, C1QC, SOCS3, FCGR1A and CLEC4C; between the
 sexes XIST and an eosinophil and basophil set (CLC, HDC, CCR3, GATA2, MS4A3);
 and the shared column, XIST and HLA-DQB1, is the confounding made visible.
+A quarter of the plain fit's boosting steps (14% to 40% per dimension) would
+have gone to another gene without that variance; on one dimension the picks
+it decided are the interferon genes IFI27, IFITM3, IRF7, OAS3 and SIGLEC1.
 
 ```python
 plot_selection_trace(adata, dims=[0])                               # hollow marker: without the design variance, another gene

@@ -1292,34 +1292,38 @@ class BAE(nn.Module):
             if decompose is None:
                 grads["recon"] = recon_grad
             else:
-                columns, stratified = self._decompose_columns, self._decompose_within is not None
+                # One backward pass per subset S for G_S = ||Q_Sᵀ R||² / p; every
+                # part is the same linear combination of the G_S gradients and of
+                # the per-gene explained sums of squares, from one set of projections.
+                columns = self._decompose_columns
+                joint, empty = frozenset(columns), frozenset()
+                combos = {f"between_{v}": {joint: 1.0, joint - {v}: -1.0} for v in columns}
+                if len(columns) > 1:
+                    combos["shared"] = {joint: 1.0 - len(columns), empty: -1.0}
+                    combos["shared"].update({joint - {v}: 1.0 for v in columns})
+                combos["strata" if self._decompose_within is not None else "mean"] = {empty: 1.0}
+
+                def combine(table: dict) -> dict:
+                    return {
+                        name: sum(c * table[key] for key, c in combo.items())
+                        for name, combo in combos.items()
+                    }
+
                 R = x_recon - X
-                bases = {
-                    key: torch.as_tensor(Q, dtype=X.dtype, device=X.device)
+                proj = {
+                    key: torch.as_tensor(Q, dtype=X.dtype, device=X.device).T @ R
                     for key, Q in decompose.items()
                 }
-
-                def explained(key: frozenset) -> torch.Tensor:
-                    value = ((bases[key].T @ R) ** 2).sum() / X.shape[1]
-                    return torch.autograd.grad(value, z, retain_graph=True)[0]
-
-                joint, empty = frozenset(columns), frozenset()
-                g_joint, g_empty = explained(joint), explained(empty)
-                unique = {v: g_joint - explained(joint - {v}) for v in columns}
-                grads.update({f"between_{v}": g for v, g in unique.items()})
-                if len(columns) > 1:
-                    grads["shared"] = g_joint - g_empty - sum(unique.values())
-                grads["strata" if stratified else "mean"] = g_empty
-                grads["within"] = recon_grad - g_joint
+                explained = {
+                    key: torch.autograd.grad((P**2).sum() / X.shape[1], z, retain_graph=True)[0]
+                    for key, P in proj.items()
+                }
+                grads.update(combine(explained))
+                grads["within"] = recon_grad - explained[joint]
                 with torch.no_grad():
-                    # The same split per gene, as shares of its residual sum of squares.
-                    ss = {key: ((Q.T @ R) ** 2).sum(dim=0) for key, Q in bases.items()}
+                    ss = {key: (P**2).sum(dim=0) for key, P in proj.items()}
                     r_sq = (R**2).sum(dim=0)
-                    cols = {f"between_{v}": ss[joint] - ss[joint - {v}] for v in columns}
-                    if len(columns) > 1:
-                        cols["shared"] = ss[joint] - ss[empty] - sum(cols.values())
-                    cols["strata" if stratified else "mean"] = ss[empty]
-                    cols["within"] = r_sq - ss[joint]
+                    cols = {**combine(ss), "within": r_sq - ss[joint]}
                     shares = {n: (c / r_sq.clamp_min(1e-30)).cpu().numpy() for n, c in cols.items()}
 
         # Target = current z moved in negative gradient direction
