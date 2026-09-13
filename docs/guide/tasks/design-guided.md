@@ -392,9 +392,13 @@ The parts ride along as extra target columns in the same `allboost` call, sharin
 the covariance cache; the leaders' predictor–target product is computed apart
 from the followers' so that the fit stays bitwise the plain one. Measured at
 2,000 cells and 2,000 or 5,000 genes over 20 iterations, the fit time with a
-`design_key` was within run-to-run noise of the plain fit. The decomposition
-adds one backward pass per subset of its variables (TODO_COST). The stored trace
-is a few `(latent_dim, stepno)` arrays plus the `(n_genes, n_parts)` shares.
+`design_key` was within run-to-run noise of the plain fit, and so were the
+per-variable blocks on the Wilk cohort (44,116 cells, 2,000 genes, 4 threads:
+1.5 s per iteration either way). The decomposition adds one backward pass
+through the decoder per subset of its variables, two for one variable and
+`m + 2` for `m`: on the same data 2.0 s per iteration for one variable and
+3.3 s for two variables with cell-type strata. The stored trace is a few
+`(latent_dim, stepno)` arrays plus the `(n_genes, n_parts)` shares.
 
 ## Not in this release
 

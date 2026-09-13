@@ -167,7 +167,10 @@ of the sex block, with the disease dimension alone still at within-cell-type
 AUROC 0.88; and the decomposition of the plain fit put the between-disease
 residual variance on the complement and interferon monocyte genes (C1QA/B/C,
 SOCS3, FCGR1A, CLEC4C), 0.17% of the residual against 99.3% within, and flagged
-a quarter of the plain fit's boosting steps as decided by that variance.
+a quarter of the plain fit's boosting steps as decided by that variance. Cost on
+that data, 4 threads: 1.5 s per iteration plain or block-guided, 2.0 s with one
+decomposed variable, 3.3 s with two and cell-type strata (one backward pass per
+subset of the variables).
 
 
 `plot_selection_trace` and `plot_selection_paths` gain `decided_by`, the part
