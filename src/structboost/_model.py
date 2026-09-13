@@ -467,8 +467,10 @@ class BAE(nn.Module):
         #: weights and the per-step selection trace of the restored iteration.
         self._design_encoding = None
         self._design_dims: np.ndarray | None = None
+        self._design_within: list[str] | None = None
         self._encoder_components: dict[str, np.ndarray] | None = None
         self._selection_trace: dict | None = None
+        self._selection_path: dict | None = None
         #: Layer `fit` read expression from; None means ``adata.X``. Later calls
         #: default to it so a model always reads the representation it learned on.
         self._layer: str | None = None
@@ -889,18 +891,59 @@ class BAE(nn.Module):
         full[prior_dims:] = betamat
         return full
 
-    @staticmethod
-    def _design_basis(encoded: np.ndarray) -> np.ndarray:
-        """Orthonormal basis of the design column space, intercept included.
+    def _design_projector(self, adata: AnnData) -> tuple[np.ndarray, np.ndarray | None]:
+        """Orthonormal bases ``(Q_keep, Q_drop)`` defining the design-explained part.
 
-        ``(I - Q Qᵀ) z`` is then the part of a latent column that neither the
-        grand mean nor the design explains: for a categorical design, the
-        within-group deviations. The intercept matters even though the encoded
-        columns are centred, because otherwise a column's mean would count as
-        unexplained and be shrunk toward zero.
+        The part of a target column the design term keeps is
+        ``Q_keep Q_keepᵀ t - Q_drop Q_dropᵀ t``. Without ``design_within``,
+        ``Q_keep`` spans the intercept and the encoded design columns and
+        ``Q_drop`` is None: what is removed is the within-group deviation, for a
+        categorical design. The intercept matters even though the encoded columns
+        are centred, because otherwise a column's mean would count as unexplained
+        and be shrunk toward zero.
+
+        With ``design_within`` (the stratified form), ``Q_drop`` spans the stratum
+        indicators and ``Q_keep`` the stratum-by-design interaction, so the kept
+        part is the design effect *within* each stratum: the stratum main effect,
+        typically cell type, is removed along with the residual rather than kept.
+        Bases come from a rank-revealing SVD (``scipy.linalg.orth``) because
+        empty stratum-design cells make the interaction design rank deficient.
         """
-        design = np.column_stack([np.ones(encoded.shape[0]), np.asarray(encoded, dtype=np.float64)])
-        return np.linalg.qr(design)[0]
+        from ._utils import transform_obs_covariates
+
+        design = np.asarray(
+            transform_obs_covariates(adata, self._design_encoding), dtype=np.float64
+        )
+        if self._design_within is None:
+            keep = np.column_stack([np.ones(design.shape[0]), design])
+            return np.linalg.qr(keep)[0], None
+
+        import pandas as pd
+        from scipy.linalg import orth
+
+        labels = adata.obs[self._design_within].astype(str).agg("|".join, axis=1)
+        strata = pd.get_dummies(labels).to_numpy(dtype=np.float64)
+        interaction = np.hstack(
+            [strata, *(strata * design[:, [j]] for j in range(design.shape[1]))]
+        )
+        return orth(interaction), orth(strata)
+
+    @staticmethod
+    def _design_keep(Q_keep: np.ndarray, Q_drop: np.ndarray | None, T: np.ndarray) -> np.ndarray:
+        """The design-explained part of the columns of ``T`` (see `_design_projector`)."""
+        kept = Q_keep @ (Q_keep.T @ T)
+        return kept if Q_drop is None else kept - Q_drop @ (Q_drop.T @ T)
+
+    @staticmethod
+    def _design_r2(Q_keep: np.ndarray, Q_drop: np.ndarray | None, Z: np.ndarray) -> np.ndarray:
+        """Share of each latent column's (within-stratum) variance the design explains."""
+        Z = np.asarray(Z, dtype=np.float64)
+        centred = Z - Z.mean(axis=0) if Q_drop is None else Z - Q_drop @ (Q_drop.T @ Z)
+        kept = Q_keep @ (Q_keep.T @ centred)
+        total = (centred**2).sum(axis=0)
+        return np.divide(
+            (kept**2).sum(axis=0), total, out=np.full_like(total, np.nan), where=total > 0
+        )
 
     def _validate_transfer_fit(
         self,
@@ -1238,7 +1281,8 @@ class BAE(nn.Module):
         *,
         z_override: torch.Tensor | None = None,
         attribute: bool = False,
-        design: tuple[np.ndarray, np.ndarray, float] | None = None,
+        path: bool = False,
+        design: tuple[np.ndarray, np.ndarray | None, np.ndarray, float] | None = None,
         stats: dict[str, float] | None = None,
     ) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray] | None, dict | None]:
         """The boosting half of one training iteration: steps 1-4 of :meth:`fit`.
@@ -1272,9 +1316,12 @@ class BAE(nn.Module):
             wherever reconstruction keeps re-injecting what the design term keeps
             removing, the two shadows grow while cancelling -- measured at 400x
             the weight on planted data at ``design_lambda=0.5``.
+        path
+            Record the selected gene and its increment per step even without
+            attribution (``track_selection_path``). Free: the history is passive.
         design
-            ``(Q, dims, factor)``: orthonormal basis of the design column space
-            (intercept included), the constrained latent dimensions, and
+            ``(Q_keep, Q_drop, dims, factor)``: the projector bases from
+            :meth:`_design_projector`, the constrained latent dimensions, and
             ``target_optim_lr * design_lambda``. Applied after orthogonalization,
             so the constraint is exact and the orthogonality between constrained
             and free dimensions is the approximate one.
@@ -1288,9 +1335,15 @@ class BAE(nn.Module):
         parts
             ``{name: (latent_dim, n_genes)}`` summing to the gene weights, or None.
         trace
-            Per-step record (``gene``, ``delta`` per part, ``counterfactual_gene``
-            for the target without the design step and for the reconstruction
-            step alone, ``target_norm`` per part), or None.
+            Per-step record: ``gene``; ``delta`` per part; per replayed part the
+            ``counterfactual_gene`` it would have picked and the ``rank`` of the
+            applied gene under its criterion; and, for the total and each
+            replayed part, the ``fit_score`` of the applied update against that
+            part's residual (1 minus the relative residual left, Eq. 13-15 of the
+            PerturbBoost supplement), the cosine ``alignment`` of the applied gene
+            with that residual (Eq. 16-17) and the first-order ``gain`` (Eq. 20);
+            plus ``target_norm`` per part. With only ``path``, just ``gene`` and
+            ``delta["total"]``. None otherwise.
         """
         out = self._compute_boosting_targets(
             X,
@@ -1321,9 +1374,15 @@ class BAE(nn.Module):
                 targets = disentangle_boosting_targets(targets, alpha=alpha)
 
         if design is not None:
-            Q, dims, factor = design
+            Q_keep, Q_drop, dims, factor = design
             block = targets[:, dims].astype(np.float64)
-            targets[:, dims] = (block - factor * (block - Q @ (Q.T @ block))).astype(targets.dtype)
+            kept = self._design_keep(Q_keep, Q_drop, block)
+            targets[:, dims] = (block - factor * (block - kept)).astype(targets.dtype)
+        if attribute:
+            # The design part is replayed too, for its scores and counterfactual;
+            # its *weights* are still taken as the exact remainder below.
+            followers["design"] = targets - follower_targets[0]
+            follower_targets.append(followers["design"])
 
         self.encoder.reset_weights()
         n_features = boost["sourcemat"].shape[1]
@@ -1350,25 +1409,31 @@ class BAE(nn.Module):
                 beta_init=beta_init,
                 return_covcache=boost["covcache"] is None,
             )
+            if attribute or path:
+                kwargs["return_history"] = "steps"
             if attribute:
                 # Followers ride along as extra target columns: one predictor-target
                 # product and one covariance cache for the total and its parts.
                 kwargs["selection_from"] = np.tile(np.arange(k), 1 + len(followers))
-                kwargs["return_history"] = "steps"
                 if isinstance(fit_mandatory, list):
                     kwargs["mandatory_features"] = fit_mandatory * (1 + len(followers))
                 fit_targets = np.hstack([fit_targets, *follower_targets])
             result = allboost(boost["sourcemat"], fit_targets, **kwargs)
             betamat, *rest = result if isinstance(result, tuple) else (result,)
-            hist = rest[0] if attribute else None
+            hist = rest[0] if (attribute or path) else None
             if boost["covcache"] is None:
                 boost["covcache"] = rest[-1]
         if not attribute:
+            trace = (
+                {"gene": hist.selection.copy(), "delta": {"total": hist.update.copy()}}
+                if hist is not None
+                else None
+            )
             return (
                 self._expand_transfer_betamat(betamat, n_features, prior_dims),
                 targets,
                 None,
-                None,
+                trace,
             )
 
         def split(matrix: np.ndarray) -> dict[str, np.ndarray]:
@@ -1385,12 +1450,38 @@ class BAE(nn.Module):
         stacked = np.vstack([targets.T, *(t.T for t in follower_targets)])
         norm = {"total": np.linalg.norm(targets, axis=0)}
         norm.update({n: np.linalg.norm(v, axis=1) for n, v in split(stacked).items()})
+
+        # Per-step scores of the applied update against each part's residual, all
+        # from the O(1) bookkeeping allboost keeps: with u the applied increment,
+        # s_c = x_j' r_c and q_c = ||r_c||^2 just before the step,
+        #   fit_score = 1 - ||r_c - u x_j||^2 / ||r_c||^2 = (2 u s_c - u^2 ||x_j||^2) / q_c,
+        #   alignment = s_c / (||x_j|| ||r_c||),   gain = u s_c.
+        gene = hist.selection[:k]
+        rows = {"total": 0, **{n: i + 1 for i, n in enumerate(followers)}}
+        u = hist.update[:k]
+        xnorm_sq = np.where(gene >= 0, boost["col_norms_sq"][np.maximum(gene, 0)], 0.0).astype(
+            np.float64
+        )
+        eps = np.finfo(np.float64).tiny
+        fit_score, alignment, gain = {}, {}, {}
+        for name, r in rows.items():
+            s_c = hist.score[k * r : k * (r + 1)]
+            q_c = hist.residual_sq[k * r : k * (r + 1)]
+            fit_score[name] = (2.0 * u * s_c - u**2 * xnorm_sq) / (q_c + eps)
+            alignment[name] = s_c / (np.sqrt(xnorm_sq * q_c) + eps)
+            gain[name] = u * s_c
         trace = {
-            "gene": hist.selection[:k].copy(),
+            "gene": gene.copy(),
             "delta": delta,
             "counterfactual_gene": {
                 n: hist.selection[k * (i + 1) : k * (i + 2)].copy() for i, n in enumerate(followers)
             },
+            "rank": {
+                n: hist.rank[k * (i + 1) : k * (i + 2)].copy() for i, n in enumerate(followers)
+            },
+            "fit_score": fit_score,
+            "alignment": alignment,
+            "gain": gain,
             "target_norm": norm,
         }
         return betamat[:k], targets, new_parts, trace
@@ -1744,6 +1835,8 @@ class BAE(nn.Module):
         batch_integration_mode: Literal["encoder", "decoder", "both"] = _MODE_UNSET,  # type: ignore[assignment]
         design_key: str | list[str] | None = None,
         design_dims: list[int] | np.ndarray | None = None,
+        design_within: str | list[str] | None = None,
+        track_selection_path: bool = False,
         max_iterations: int | None = None,
         early_stopping_patience: int | None = None,
         enable_early_stopping: bool | None = None,
@@ -1865,6 +1958,21 @@ class BAE(nn.Module):
             numeric column): the design subspace has dimension ``q``, so more
             constrained dimensions than that cannot all be design-explained and
             mutually orthogonal. The remaining dimensions stay reconstruction-only.
+        design_within
+            Obs column(s) defining strata, typically the cell type. With it the
+            kept part of the target is the design effect *within* each stratum:
+            the stratum main effect is removed together with the within-cell
+            residual, so a constrained dimension separates conditions inside every
+            cell type rather than separating cell types whose composition differs
+            between conditions. ``latent_design_r2_per_dim`` then reports the share
+            of within-stratum variance the design explains. Requires ``design_key``.
+        track_selection_path
+            Also store, for *every* training iteration, the gene selected at each
+            boosting step and its increment, as ``uns["bae"]["selection_path"]``
+            with arrays of shape ``(n_iterations, latent_dim, stepno)``. This is
+            the lightweight selection-stability log; the full per-step scores are
+            kept for the restored iteration only. Works with or without a
+            ``design_key`` and does not change the fit.
         max_iterations
             Maximum training iterations (overrides config).
         early_stopping_patience
@@ -1993,6 +2101,10 @@ class BAE(nn.Module):
         if design_key is None and design_dims is not None:
             raise ValueError(
                 "design_dims was given without a design_key; there is nothing to separate"
+            )
+        if design_key is None and design_within is not None:
+            raise ValueError(
+                "design_within was given without a design_key; there is nothing to stratify"
             )
         if design_key is not None:
             if init_pca or init_obsm is not None:
@@ -2180,6 +2292,7 @@ class BAE(nn.Module):
         # --- Design guidance: which dimensions, and the subspace they are pulled to ---
         self._design_encoding = None
         self._design_dims = None
+        self._design_within = None
         design = None
         if design_key is not None:
             from ._utils import encode_obs_covariates
@@ -2202,8 +2315,20 @@ class BAE(nn.Module):
                     f"got {dims.tolist()}"
                 )
             self._design_dims = dims
+            within = (
+                None
+                if design_within is None
+                else ([design_within] if isinstance(design_within, str) else list(design_within))
+            )
+            if within:
+                missing = [c for c in within if c not in adata.obs.columns]
+                if missing:
+                    raise ValueError(f"design_within columns {missing} not found in adata.obs")
+                if set(within) & set(design_columns):
+                    raise ValueError("design_within and design_key must name different columns")
+            self._design_within = within
             design = (
-                self._design_basis(self._design_encoding.encoded),
+                *self._design_projector(adata),
                 dims,
                 self.config.target_optim_lr * self.config.design_lambda,
             )
@@ -2266,6 +2391,7 @@ class BAE(nn.Module):
         best_batch_weights = None
         best_components = None
         best_trace = None
+        path_log: dict[str, list[np.ndarray]] = {"gene": [], "update": []}
 
         # Training loop
         self._training_history = {"train_loss": [], "selection_loss": []}
@@ -2297,9 +2423,13 @@ class BAE(nn.Module):
                 boost,
                 z_override=z_init if iteration == 0 else None,
                 attribute=design is not None,
+                path=track_selection_path,
                 design=design,
                 stats=diag_stats if collect_diagnostics else None,
             )
+            if track_selection_path and trace is not None:
+                path_log["gene"].append(trace["gene"])
+                path_log["update"].append(trace["delta"]["total"])
 
             # Extract gene weights only; obs weights are nuisance (discarded)
             W_genes = betamat[:, : self.n_genes]
@@ -2396,6 +2526,11 @@ class BAE(nn.Module):
         self._batch_weights = best_batch_weights
         self._encoder_components = best_components
         self._selection_trace = best_trace
+        self._selection_path = (
+            {name: np.stack(values) for name, values in path_log.items()}
+            if path_log["gene"]
+            else None
+        )
 
         self._is_fitted = True
 
@@ -2617,7 +2752,7 @@ class BAE(nn.Module):
         design = None
         if self._design_encoding is not None:
             design = (
-                self._design_basis(transform_obs_covariates(adata, self._design_encoding)),
+                *self._design_projector(adata),
                 self._design_dims,
                 self.config.target_optim_lr * self.config.design_lambda,
             )
@@ -3503,9 +3638,13 @@ class BAE(nn.Module):
             uns_dict["design_columns"] = self._design_encoding.encoded_columns
             uns_dict["design_dims"] = np.asarray(self._design_dims, dtype=np.intp)
             uns_dict["design_lambda"] = self.config.design_lambda
-            uns_dict["latent_design_r2_per_dim"] = latent_r2_per_dim(
-                transform_obs_covariates(adata, self._design_encoding), latent
+            if self._design_within is not None:
+                uns_dict["design_within"] = list(self._design_within)
+            uns_dict["latent_design_r2_per_dim"] = self._design_r2(
+                *self._design_projector(adata), latent
             )
+        if self._selection_path is not None:
+            uns_dict["selection_path"] = {k: v.copy() for k, v in self._selection_path.items()}
         if self._encoder_components is not None:
             # Exact split of the encoder: these sum to varm["BAE_encoder_weights"] to
             # within its float32 rounding. Kept in float64: the parts are float64 and

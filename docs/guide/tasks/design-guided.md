@@ -83,6 +83,29 @@ already separates. A numeric design column gives a linear trend, not groups; pas
 timepoints as a categorical column for groups.
 :::
 
+## Heterogeneous data: keep the effect inside each cell type
+
+When cell-type composition differs between conditions, a dimension that
+separates the conditions can do so by separating cell types. `design_within`
+names the strata, typically the annotated cell type, and changes what the
+design term keeps: the design effect *within* each stratum. The stratum main
+effect is removed together with the within-cell residual, so a constrained
+dimension separates the conditions inside every cell type and does not separate
+the cell types themselves. This is the stratified formulation of the PerturbBoost
+supplement (its Eq. 10), realised with two projectors, one onto the stratum
+indicators and one onto the stratum-by-design interaction; the kept part is
+their difference.
+
+```python
+model.fit(adata, design_key="disease", design_within="cell_type")
+adata.uns["bae"]["latent_design_r2_per_dim"]   # share of within-cell-type variance the design explains
+```
+
+Disease nested in donor, as in a case-control cohort, is the situation where
+this matters most, and it is also the situation where a donor `batch_key` must
+*not* be given: every donor is one condition, so mandatory donor regressors in
+the boosting fit absorb the disease effect entirely.
+
 `design_dims` defaults to the first `min(q, latent_dim)` dimensions, `q` being the
 number of encoded design columns (levels minus one per categorical column). The
 design subspace has dimension `q`, so more constrained dimensions than that
@@ -138,8 +161,29 @@ trace["gene"]                              # (latent_dim, stepno) gene selected 
 trace["delta"]["total" | "carry" | "recon" | "design"]   # its increment, split
 trace["counterfactual_gene"]["no_design"]  # what the target without the design step would have picked
 trace["counterfactual_gene"]["recon"]      # what the reconstruction step alone would have picked
+trace["rank"]["no_design"]                 # rank of the applied gene under that target (0 = its own first choice)
+trace["fit_score"][part]                   # 1 - relative residual the applied update leaves in that part
+trace["alignment"][part]                   # cosine between the applied gene and that part's residual
+trace["gain"][part]                        # first-order decrease of that part's residual, <r_part, Δh>
 trace["target_norm"][...]                  # per-dimension norm of each target part
 ```
+
+`fit_score`, `alignment` and `gain` are the candidate-specific scores of the
+PerturbBoost supplement (its Eq. 13 to 20), evaluated for the applied update
+against the residual of each part, `total`, `no_design`, `recon` and `design`.
+They cost nothing extra: `allboost` tracks each residual's norm in O(1) per step.
+On the winning genes the `design` alignment is negative, for the reason above.
+`track_selection_path=True` additionally logs the selected gene and its increment
+at every iteration, as `uns["bae"]["selection_path"]`, the lightweight
+selection-stability record; the scores are kept for the restored iteration only.
+
+One choice deliberately not taken from the supplement is its Eq. 9 loss,
+`log S_W − α log S_B`. Its per-cell gradient scales as `1/S_W`, so at the latent
+scale boosting shrinkage produces it would need a calibration per dataset, and
+its between-scatter term adds nothing to *selection* that full filtering does not:
+selection compares between-group against within-group scores, and any
+amplification of the former is equivalent to a stronger filter of the latter up
+to an overall scale, while the amplification would let the latent scale grow.
 
 `counterfactual_gene["no_design"]` is the direct answer to *was this gene selected
 because of the design term*: at each step, given the genes already entered and

@@ -89,6 +89,18 @@ opposed the weight's sign on every selected condition gene. The target-part
 norms carry a null signature: 0.76 of the total on real signal, 15 times the
 total on shuffled labels, where the filter removed nearly everything.
 
+**Candidate-specific scores per boosting step, and the stratified form.** The
+trace also carries, for the total and each part, the fit score of the applied
+update against that part's residual, its cosine alignment and its first-order
+gain (Eq. 13 to 20 of the PerturbBoost supplement), plus the rank of the applied
+gene under the no-design target. `allboost` tracks every residual's norm in O(1)
+per step, so they are free. `design_within` names strata, typically the cell
+type: the kept part becomes the design effect within each stratum, with the
+stratum main effect removed rather than kept, so a constrained dimension
+separates conditions inside every cell type instead of separating cell types
+whose composition differs between conditions. `track_selection_path=True` logs
+the selected gene and increment at every iteration.
+
 **New `"attribution"` panel in `plot_latent_dimensions` and new
 `plot_selection_trace`.** The panel draws each top gene's weight by part, side
 by side rather than stacked since the parts can have opposite signs; the trace

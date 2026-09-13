@@ -279,8 +279,10 @@ def build_payload(model: BAE) -> dict[str, Any]:
         "prior_info": _to_primitive(model._prior_info, coerce_unknown=True),
         "design_encoding": _encode_encoding(model._design_encoding),
         "design_dims": _to_primitive(model._design_dims),
+        "design_within": _to_primitive(model._design_within),
         "encoder_components": _map_leaves(model._encoder_components, _tensor),
         "selection_trace": _map_leaves(model._selection_trace, _tensor),
+        "selection_path": _map_leaves(model._selection_path, _tensor),
         "latent_scaling": (
             None
             if scaling is None
@@ -344,8 +346,11 @@ def restore_payload(cls: type[BAE], payload: dict[str, Any], device: Any) -> BAE
     model._design_encoding = _decode_encoding(payload.get("design_encoding"))
     dims = payload.get("design_dims")
     model._design_dims = None if dims is None else np.asarray(dims, dtype=np.intp)
+    within = payload.get("design_within")
+    model._design_within = None if within is None else list(within)
     model._encoder_components = _map_leaves(payload.get("encoder_components"), _array)
     model._selection_trace = _map_leaves(payload.get("selection_trace"), _array)
+    model._selection_path = _map_leaves(payload.get("selection_path"), _array)
     scaling = payload["latent_scaling"]
     model._latent_scaling = (
         None

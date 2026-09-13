@@ -47,6 +47,19 @@ class AllboostHistory:
         shape (n_targets, stepno). Steps that never ran (see ``selection`` = -1)
         hold 0. Excludes the mandatory pre-step, whose coefficients are not
         selected.
+    score
+        ``x_j' r`` of the *applied* feature ``j`` against this target's residual
+        ``r`` just before the update, shape (n_targets, stepno). For a follower
+        this is the applied (leader's) feature scored against the follower's own
+        residual, which is what the fit, alignment and gain scores of
+        :meth:`structboost.BAE.fit` are built from.
+    residual_sq
+        ``||r||^2`` of this target's residual just before the update, shape
+        (n_targets, stepno). Tracked in O(1) per step from the same quantities.
+    rank
+        Rank of the applied feature under this target's own selection criterion
+        (0 = it was this target's own first choice), shape (n_targets, stepno).
+        Always 0 for a target that selects for itself.
     beta_path
         Coefficient path after each step, shape (n_targets, stepno, n_features).
         ``None`` when ``return_history="steps"``: the full path costs
@@ -56,6 +69,9 @@ class AllboostHistory:
 
     selection: NDArray[np.int64]
     update: NDArray[np.float64]
+    score: NDArray[np.float64]
+    residual_sq: NDArray[np.float64]
+    rank: NDArray[np.int64]
     beta_path: NDArray[np.float64] | None = None
 
 
@@ -151,7 +167,7 @@ def _mandatory_prestep(
     penalties are expressed relative to each predictor's squared norm.
     """
     if mand_idx.size == 0:
-        return actualnom, beta
+        return actualnom, beta, 0.0
 
     # Include the derivative of the penalty at the current coefficient. Without
     # this term, repeatedly applying a ridge pre-step would converge back to the
@@ -171,10 +187,16 @@ def _mandatory_prestep(
             "stabilize the block — note that ridge changes the estimates, so it "
             "is not applied automatically."
         ) from exc
+    # Change of ||r||^2 from r <- r - X_m gamma, from quantities already at hand:
+    # x_m' r is `actualnom * norms` on the block, and the Gram block is `lhs`
+    # without its ridge diagonal.
+    xr = actualnom[mand_idx] * col_norms_sq[mand_idx]
+    gram = block.lhs - np.diag(block.penalty)
+    residual_delta = float(gamma_mand @ gram @ gamma_mand - 2.0 * gamma_mand @ xr)
     beta[mand_idx] += gamma_mand
     actualnom -= (block.cov @ gamma_mand) / col_norms_sq
 
-    return actualnom, beta
+    return actualnom, beta, residual_delta
 
 
 @overload
@@ -522,6 +544,9 @@ def allboost(
     selection_hist = np.full((k, stepno), -1, dtype=np.int64)
     applied = np.full((k, stepno), -1, dtype=np.int64)
     update_hist = np.zeros((k, stepno), dtype=np.float64)
+    score_hist = np.zeros((k, stepno), dtype=np.float64)
+    residual_hist = np.zeros((k, stepno), dtype=np.float64)
+    rank_hist = np.zeros((k, stepno), dtype=np.int64)
     beta_path: NDArray[np.float64] | None = None
     if return_history is True:
         beta_path = np.zeros((k, stepno, p), dtype=np.float64)
@@ -584,6 +609,7 @@ def allboost(
     else:
         residuals = targetmat - sourcemat @ beta_init.T
     initial_nom = (sourcemat.T @ residuals) / col_norms_sq[:, None]
+    initial_residual_sq = np.einsum("ij,ij->j", residuals, residuals, dtype=np.float64)
 
     # Initialize shared state (used if independent=False)
     if not independent:
@@ -598,6 +624,7 @@ def allboost(
 
         # `.copy()` is required: actualnom is updated in place below.
         actualnom = initial_nom[:, t_idx].copy()
+        residual_sq = float(initial_residual_sq[t_idx])
         beta = np.zeros(p, dtype=np.float64) if beta_init is None else beta_init[t_idx].copy()
         mand_idx = mandatory_per_target[t_idx]
         # Built once per target: nothing in it depends on the boosting step.
@@ -609,7 +636,7 @@ def allboost(
 
         for step in range(stepno):
             if mand_block is not None:
-                actualnom, beta = _mandatory_prestep(
+                actualnom, beta, residual_delta = _mandatory_prestep(
                     mand_idx,
                     actualnom,
                     beta,
@@ -617,6 +644,7 @@ def allboost(
                     mand_block,
                     t_idx,
                 )
+                residual_sq += residual_delta
 
             if mand_idx.size >= p:
                 # Every predictor is mandatory, so there is no eligible candidate to
@@ -658,12 +686,18 @@ def allboost(
                 actualsel = int(applied[selection_from[t_idx], step])
                 if actualsel < 0:
                     break
+                rank_hist[t_idx, step] = int((criterion > criterion[actualsel]).sum())
             applied[t_idx, step] = actualsel
 
             # Update the winner only. `actualnom` is refreshed through the cached
             # covariance column rather than by recomputing the residual.
             actualupdate = nuvec[actualsel] * actualnom[actualsel]
+            score = float(numer[actualsel])
             update_hist[t_idx, step] = actualupdate
+            score_hist[t_idx, step] = score
+            residual_hist[t_idx, step] = residual_sq
+            # r <- r - u x_j, so ||r||^2 <- ||r||^2 - 2 u x_j'r + u^2 ||x_j||^2.
+            residual_sq += actualupdate * (actualupdate * col_norms_sq[actualsel] - 2.0 * score)
             beta[actualsel] += actualupdate
             cov_col = get_covariance_column(actualsel)
             actualnom -= actualupdate * cov_col / col_norms_sq
@@ -676,7 +710,14 @@ def allboost(
 
         betamat[t_idx, :] = beta
 
-    history = AllboostHistory(selection=selection_hist, update=update_hist, beta_path=beta_path)
+    history = AllboostHistory(
+        selection=selection_hist,
+        update=update_hist,
+        score=score_hist,
+        residual_sq=residual_hist,
+        rank=rank_hist,
+        beta_path=beta_path,
+    )
     if return_history and return_covcache:
         return betamat, history, _covcache
     if return_history:

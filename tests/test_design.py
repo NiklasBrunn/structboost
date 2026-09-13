@@ -181,7 +181,21 @@ def test_attribution_is_exact_and_belongs_to_the_restored_iteration():
     trace = adata.uns["bae"]["selection_trace"]
     assert trace["gene"].shape == (3, 10)
     assert set(trace["delta"]) == {"total", "carry", "recon", "design"}
-    assert set(trace["counterfactual_gene"]) == {"no_design", "recon"}
+    assert set(trace["counterfactual_gene"]) == {"no_design", "recon", "design"}
+    assert set(trace["rank"]) == {"no_design", "recon", "design"}
+    for key in ("fit_score", "alignment", "gain"):
+        assert set(trace[key]) == {"total", "no_design", "recon", "design"}
+    # The applied update is each total's own first choice, so it fits its own
+    # residual best of all candidates and points along it.
+    assert (trace["fit_score"]["total"] <= 1.0).all()
+    assert (trace["fit_score"]["total"] > 0).all()
+    assert (np.abs(trace["alignment"]["total"]) <= 1.0 + 1e-12).all()
+    assert (trace["gain"]["total"] > 0).all()
+    # A step the design part decided is one where the no-design target ranked the
+    # applied gene below its own first choice.
+    decided = trace["counterfactual_gene"]["no_design"] != trace["gene"]
+    assert (trace["rank"]["no_design"][decided] > 0).all()
+    assert (trace["rank"]["no_design"][~decided] == 0).all()
     np.testing.assert_allclose(
         trace["delta"]["carry"] + trace["delta"]["recon"] + trace["delta"]["design"],
         trace["delta"]["total"],
@@ -300,6 +314,7 @@ def test_correlation_mode_gets_its_own_component():
         "no_design",
         "recon",
         "correlation",
+        "design",
     }
 
 
@@ -362,6 +377,21 @@ def test_design_state_survives_save_and_load(tmp_path):
     # A loaded model continues the guided alternation as well.
     loaded.stability_selection(adata, n_runs=1, seed=0, verbose=False)
 
+    # Stratified form and the path log round-trip too.
+    import pandas as pd
+
+    adata.obs["stratum"] = pd.Categorical(np.where(np.arange(adata.n_obs) < 200, "a", "b"))
+    model = _fit(adata, design_key="cond", design_within="stratum", track_selection_path=True)
+    loaded = BAE.load(model.save(tmp_path / "within.pt"))
+    assert loaded._design_within == ["stratum"]
+    np.testing.assert_array_equal(loaded._selection_path["gene"], model._selection_path["gene"])
+    np.testing.assert_array_equal(
+        loaded._selection_trace["fit_score"]["design"],
+        model._selection_trace["fit_score"]["design"],
+    )
+    b = adata.copy()
+    loaded.stability_selection(b, n_runs=1, seed=0, verbose=False)
+
 
 def test_design_readout_survives_h5ad(tmp_path):
     _require_bae()
@@ -402,3 +432,53 @@ def test_attribution_panel_and_trace_plot():
         plot_latent_dimensions(plain, panels=("attribution",))
     with pytest.raises(KeyError, match="selection_trace"):
         plot_selection_trace(plain)
+
+
+def test_design_within_keeps_the_effect_inside_strata():
+    """With strata, a constrained dimension separates conditions inside each cell
+    type; the cell-type main effect is removed rather than kept. Planted: the
+    condition shift is the same in both strata, so the within-stratum R² should be
+    high while the dimension does not separate the strata themselves."""
+    _require_bae()
+    import pandas as pd
+
+    adata = _planted()
+    adata.obs["stratum"] = pd.Categorical(np.where(np.arange(adata.n_obs) < 200, "a", "b"))
+    _fit(adata, design_key="cond", design_within="stratum", config=dict(design_lambda=1.0))
+    assert adata.uns["bae"]["design_within"] == ["stratum"]
+    r2 = adata.uns["bae"]["latent_design_r2_per_dim"]
+    assert r2[0] > 0.5
+    z0 = adata.obsm["X_bae"][:, 0]
+    strata = adata.obs["stratum"].to_numpy()
+    between_strata = abs(z0[strata == "a"].mean() - z0[strata == "b"].mean())
+    cond = adata.obs["cond"].to_numpy()
+    between_cond = abs(z0[cond == "ko"].mean() - z0[cond == "wt"].mean())
+    assert between_cond > 3 * between_strata
+    with pytest.raises(ValueError, match="without a design_key"):
+        _fit(adata, design_within="stratum")
+    with pytest.raises(ValueError, match="not found"):
+        _fit(adata, design_key="cond", design_within="nope")
+    with pytest.raises(ValueError, match="different columns"):
+        _fit(adata, design_key="cond", design_within="cond")
+
+
+def test_track_selection_path_logs_every_iteration_without_changing_the_fit():
+    _require_bae()
+    plain = _planted()
+    logged = _planted()
+    _fit(plain)
+    _fit(logged, track_selection_path=True)
+    np.testing.assert_array_equal(
+        plain.varm["BAE_encoder_weights"], logged.varm["BAE_encoder_weights"]
+    )
+    path = logged.uns["bae"]["selection_path"]
+    assert path["gene"].shape == (25, 3, 10)
+    assert path["update"].shape == (25, 3, 10)
+    assert "selection_path" not in plain.uns["bae"]
+    # With a design key the path and the trace describe the same iterations.
+    guided = _planted()
+    model = _fit(guided, design_key="cond", track_selection_path=True)
+    trace = guided.uns["bae"]["selection_trace"]
+    path = guided.uns["bae"]["selection_path"]
+    assert any(np.array_equal(path["gene"][i], trace["gene"]) for i in range(path["gene"].shape[0]))
+    assert model._selection_path is not None
