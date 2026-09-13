@@ -461,6 +461,14 @@ class BAE(nn.Module):
         self._batch_integration_mode: str = "none"
         self._batch_weights: np.ndarray | None = None
         self._mandatory_genes = None
+        #: Design guidance (`fit(design_key=...)`): the covariate encoding whose
+        #: column space the constrained latent dimensions are pulled toward, the
+        #: dimensions it acts on, the exact recon/design split of the encoder
+        #: weights and the per-step selection trace of the restored iteration.
+        self._design_encoding = None
+        self._design_dims: np.ndarray | None = None
+        self._encoder_components: dict[str, np.ndarray] | None = None
+        self._selection_trace: dict | None = None
         #: Layer `fit` read expression from; None means ``adata.X``. Later calls
         #: default to it so a model always reads the representation it learned on.
         self._layer: str | None = None
@@ -881,10 +889,34 @@ class BAE(nn.Module):
         full[prior_dims:] = betamat
         return full
 
+    @staticmethod
+    def _design_basis(encoded: np.ndarray) -> np.ndarray:
+        """Orthonormal basis of the design column space, intercept included.
+
+        ``(I - Q Qᵀ) z`` is then the part of a latent column that neither the
+        grand mean nor the design explains: for a categorical design, the
+        within-group deviations. The intercept matters even though the encoded
+        columns are centred, because otherwise a column's mean would count as
+        unexplained and be shrunk toward zero.
+        """
+        design = np.column_stack([np.ones(encoded.shape[0]), np.asarray(encoded, dtype=np.float64)])
+        return np.linalg.qr(design)[0]
+
     def _validate_transfer_fit(
-        self, adata: AnnData, *, init_obsm: str | None, init_pca: bool
+        self,
+        adata: AnnData,
+        *,
+        init_obsm: str | None,
+        init_pca: bool,
+        design_key: str | list[str] | None = None,
     ) -> None:
         """Reject fit settings whose semantics conflict with a prior encoder matrix."""
+        if design_key is not None:
+            raise ValueError(
+                "design_key cannot be combined with a prior encoder matrix in this "
+                "release: the transferred columns would need their own component in "
+                "the weight attribution. Fit the design-guided model from scratch."
+            )
         if adata.n_vars != self.n_genes:
             raise ValueError(
                 f"This model was aligned to a {self.n_genes}-gene panel by "
@@ -1073,7 +1105,8 @@ class BAE(nn.Module):
         obs_covariates: torch.Tensor | None = None,
         stats: dict[str, float] | None = None,
         z_override: torch.Tensor | None = None,
-    ) -> np.ndarray:
+        components: bool = False,
+    ) -> np.ndarray | tuple[np.ndarray, dict[str, np.ndarray]]:
         """Compute boosting targets via single gradient step from current z.
 
         Computes targets = z_current - lr * ∂L_target/∂z, representing one step of
@@ -1122,10 +1155,17 @@ class BAE(nn.Module):
             Latent state to start from instead of ``encoder(X)``. Used once, on
             the first iteration, to warm-start training from a supplied
             representation.
+        components
+            Also return the additive parts of the target, each
+            ``(n_cells, latent_dim)``: ``"carry"`` (the current code ``z``),
+            ``"recon"`` (the reconstruction gradient step) and, under correlation
+            disentanglement, ``"correlation"``. ``targets == sum(parts)`` up to
+            float32 rounding. Used by the weight attribution.
 
         Returns
         -------
-        Target latent codes as numpy array of shape (n_cells, latent_dim).
+        Target latent codes as numpy array of shape (n_cells, latent_dim), and
+        the parts dict when ``components`` is set.
         """
         self.decoder.eval()
         # Get current encoder output (detached) and create leaf tensor for grad
@@ -1148,16 +1188,31 @@ class BAE(nn.Module):
         # into the decoder parameters, which `loss.backward()` would compute and
         # leave in `.grad` for the decoder optimizer to discard on its next
         # `zero_grad()`. Same convention as `_full_recon_loss`.
+        penalty = None
         if self.config.disentanglement == "correlation":
             correlation_loss, variance_loss = self._correlation_disentanglement_loss(z)
             # The reconstruction target loss sums over cells. Correlation and
             # variance are population averages, so multiply them by n_cells to
             # keep the per-cell regularizer gradient, and therefore lambda's
             # meaning, independent of dataset size.
-            target_loss = target_loss + X.shape[0] * self.config.disentanglement_lambda * (
-                correlation_loss + _DISENTANGLEMENT_VARIANCE_WEIGHT * variance_loss
+            penalty = (
+                X.shape[0]
+                * self.config.disentanglement_lambda
+                * (correlation_loss + _DISENTANGLEMENT_VARIANCE_WEIGHT * variance_loss)
             )
-        (z_grad,) = torch.autograd.grad(target_loss, z)
+        if components and penalty is not None:
+            # Two gradients, so the penalty's share of the step is its own
+            # component rather than being folded into reconstruction's.
+            grads = {
+                "recon": torch.autograd.grad(target_loss, z, retain_graph=True)[0],
+                "correlation": torch.autograd.grad(penalty, z)[0],
+            }
+            z_grad = grads["recon"] + grads["correlation"]
+        else:
+            if penalty is not None:
+                target_loss = target_loss + penalty
+            (z_grad,) = torch.autograd.grad(target_loss, z)
+            grads = {"recon": z_grad}
 
         # Target = current z moved in negative gradient direction
         with torch.no_grad():
@@ -1168,8 +1223,204 @@ class BAE(nn.Module):
                 # decomposition in TrainingReport compares this against
                 # `loss_post_boost` and `loss_post_decoder`, which are both means.
                 stats["loss_pre_boost"] = float(loss.detach())
+            if components:
+                parts = {"carry": z.detach().cpu().numpy()}
+                parts.update({name: (-lr * g).cpu().numpy() for name, g in grads.items()})
+                return targets.cpu().numpy(), parts
 
         return targets.cpu().numpy()
+
+    def _boost_encoder(
+        self,
+        X: torch.Tensor,
+        D: torch.Tensor | None,
+        boost: dict,
+        *,
+        z_override: torch.Tensor | None = None,
+        attribute: bool = False,
+        design: tuple[np.ndarray, np.ndarray, float] | None = None,
+        stats: dict[str, float] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray] | None, dict | None]:
+        """The boosting half of one training iteration: steps 1-4 of :meth:`fit`.
+
+        Targets by one gradient step on the latent code, optional Löwdin
+        orthogonalization, optional design filter, encoder reset, and the
+        ``allboost`` fit. Shared by :meth:`fit` and
+        :meth:`_iteration_support_frequency`, so stability selection continues
+        exactly the alternation that produced the model.
+
+        Parameters
+        ----------
+        boost
+            Fixed per-fit boosting inputs from :meth:`_boost_inputs`. Its
+            ``"covcache"`` entry is filled in place on the first call when the
+            cache is lazy.
+        attribute
+            Split the fitted encoder into the additive parts of its target. The
+            target is ``carry + recon (+ correlation) + design``: the current code
+            ``z``, the reconstruction gradient step, the correlation-penalty step
+            where that mode is on, and what the design filter removed. Boosting
+            is linear in the target once the selection path is fixed, so each
+            part is fitted along the path of the total
+            (``allboost(selection_from=...)``) and the parts sum to the encoder
+            exactly. The design part is taken as the remainder, so the identity
+            holds to the last bit rather than to float32 rounding.
+
+            Deliberately the split of *this iteration's* target, not an
+            accumulation over the fit. An accumulated split (shadow matrices
+            carried through the recursion) is exact too but ill-conditioned:
+            wherever reconstruction keeps re-injecting what the design term keeps
+            removing, the two shadows grow while cancelling -- measured at 400x
+            the weight on planted data at ``design_lambda=0.5``.
+        design
+            ``(Q, dims, factor)``: orthonormal basis of the design column space
+            (intercept included), the constrained latent dimensions, and
+            ``target_optim_lr * design_lambda``. Applied after orthogonalization,
+            so the constraint is exact and the orthogonality between constrained
+            and free dimensions is the approximate one.
+
+        Returns
+        -------
+        betamat
+            Full ``(latent_dim, n_features)`` coefficient matrix, genes first.
+        targets
+            The targets the encoder was fitted against, after all transforms.
+        parts
+            ``{name: (latent_dim, n_genes)}`` summing to the gene weights, or None.
+        trace
+            Per-step record (``gene``, ``delta`` per part, ``counterfactual_gene``
+            for the target without the design step and for the reconstruction
+            step alone, ``target_norm`` per part), or None.
+        """
+        out = self._compute_boosting_targets(
+            X,
+            lr=self.config.target_optim_lr,
+            obs_covariates=D,
+            stats=stats,
+            z_override=z_override,
+            components=attribute,
+        )
+        targets, parts = out if attribute else (out, {})
+        # Replayed followers: the target without the design step (whose pick is
+        # the counterfactual that matters) and each gradient step alone.
+        steps = [n for n in parts if n != "carry"]
+        followers = (
+            {"no_design": sum(parts.values()), **{n: parts[n] for n in steps}} if attribute else {}
+        )
+        follower_targets = list(followers.values())
+
+        if self.config.disentanglement == "orthogonal":
+            from ._utils import disentangle_boosting_targets
+
+            alpha = self.config.disentanglement_alpha
+            if attribute:
+                targets, follower_targets = disentangle_boosting_targets(
+                    targets, alpha=alpha, components=follower_targets
+                )
+            else:
+                targets = disentangle_boosting_targets(targets, alpha=alpha)
+
+        if design is not None:
+            Q, dims, factor = design
+            block = targets[:, dims].astype(np.float64)
+            targets[:, dims] = (block - factor * (block - Q @ (Q.T @ block))).astype(targets.dtype)
+
+        self.encoder.reset_weights()
+        n_features = boost["sourcemat"].shape[1]
+        prior_dims = boost["prior_dims"]
+        fit_targets, beta_init, fit_mandatory = self._transfer_boosting_inputs(
+            targets, n_features, prior_dims, boost["mandatory"]
+        )
+        k = fit_targets.shape[1]
+        if k == 0:
+            # Frozen transfer with no additional dimensions: nothing competes for
+            # selection, and only the decoder adapts to the new data.
+            betamat = np.zeros((0, n_features), dtype=np.float64)
+            hist = None
+        else:
+            kwargs = dict(
+                covcache=boost["covcache"],
+                col_norms_sq=boost["col_norms_sq"],
+                stepno=self.config.boosting_stepno,
+                nu=self.config.boosting_nu,
+                csf=self.config.boosting_csf,
+                independent=self.config.boosting_independent,
+                mandatory_features=fit_mandatory,
+                mandatory_ridge=boost["ridge"],
+                beta_init=beta_init,
+                return_covcache=boost["covcache"] is None,
+            )
+            if attribute:
+                # Followers ride along as extra target columns: one predictor-target
+                # product and one covariance cache for the total and its parts.
+                kwargs["selection_from"] = np.tile(np.arange(k), 1 + len(followers))
+                kwargs["return_history"] = "steps"
+                if isinstance(fit_mandatory, list):
+                    kwargs["mandatory_features"] = fit_mandatory * (1 + len(followers))
+                fit_targets = np.hstack([fit_targets, *follower_targets])
+            result = allboost(boost["sourcemat"], fit_targets, **kwargs)
+            betamat, *rest = result if isinstance(result, tuple) else (result,)
+            hist = rest[0] if attribute else None
+            if boost["covcache"] is None:
+                boost["covcache"] = rest[-1]
+        if not attribute:
+            return (
+                self._expand_transfer_betamat(betamat, n_features, prior_dims),
+                targets,
+                None,
+                None,
+            )
+
+        def split(matrix: np.ndarray) -> dict[str, np.ndarray]:
+            """Blocks of a stacked (leader, followers...) array as the additive parts."""
+            block = {n: matrix[k * (i + 1) : k * (i + 2)] for i, n in enumerate(followers)}
+            out = {n: block[n].copy() for n in steps}
+            out["carry"] = block["no_design"] - sum(block[n] for n in steps)
+            out["design"] = matrix[:k] - block["no_design"]
+            return out
+
+        gene_cols = slice(None, self.n_genes)
+        new_parts = {n: v[:, gene_cols] for n, v in split(betamat).items()}
+        delta = {"total": hist.update[:k], **split(hist.update)}
+        stacked = np.vstack([targets.T, *(t.T for t in follower_targets)])
+        norm = {"total": np.linalg.norm(targets, axis=0)}
+        norm.update({n: np.linalg.norm(v, axis=1) for n, v in split(stacked).items()})
+        trace = {
+            "gene": hist.selection[:k].copy(),
+            "delta": delta,
+            "counterfactual_gene": {
+                n: hist.selection[k * (i + 1) : k * (i + 2)].copy() for i, n in enumerate(followers)
+            },
+            "target_norm": norm,
+        }
+        return betamat[:k], targets, new_parts, trace
+
+    def _boost_inputs(
+        self,
+        sourcemat: np.ndarray,
+        mandatory: np.ndarray | list[np.ndarray] | None,
+        ridge: np.ndarray,
+        *,
+        precompute: bool,
+        prior_dims: int,
+    ) -> dict:
+        """Everything about the boosting problem that is fixed for a whole fit.
+
+        ``sourcemat`` is fixed, so its column norms and covariance are too;
+        computing them here, once, is what ``allboost`` would otherwise redo on
+        every call. A lazy cache starts as ``None`` and is filled by the first
+        :meth:`_boost_encoder` call.
+        """
+        from ._utils import compute_covariance_cache
+
+        return {
+            "sourcemat": sourcemat,
+            "mandatory": mandatory,
+            "ridge": ridge,
+            "prior_dims": prior_dims,
+            "col_norms_sq": column_norms_sq(sourcemat),
+            "covcache": compute_covariance_cache(sourcemat) if precompute else None,
+        }
 
     def _update_decoder(
         self,
@@ -1491,6 +1742,8 @@ class BAE(nn.Module):
         mandatory_genes: list[str] | list[int] | np.ndarray | list | None = None,
         batch_key: str | list[str] | None = None,
         batch_integration_mode: Literal["encoder", "decoder", "both"] = _MODE_UNSET,  # type: ignore[assignment]
+        design_key: str | list[str] | None = None,
+        design_dims: list[int] | np.ndarray | None = None,
         max_iterations: int | None = None,
         early_stopping_patience: int | None = None,
         enable_early_stopping: bool | None = None,
@@ -1567,6 +1820,51 @@ class BAE(nn.Module):
 
             The ridge that stabilizes the ``"encoder"`` mechanism when covariates
             are near-collinear lives on :class:`BAEConfig` as ``nuisance_ridge``.
+        design_key
+            **Exploratory**, under active development. Obs column, or several,
+            holding an experimental design variable (condition, timepoint, ...)
+            that the latent dimensions in ``design_dims`` should separate. Adds
+            the loss ``½ Σ_k ||(I - P) z_k||²`` on those dimensions — the latent
+            variance the design does *not* explain, ``P`` projecting onto the
+            encoded design columns — weighted by ``BAEConfig.design_lambda``; see
+            there for how the step is taken and what it costs.
+
+            Turning this on also makes the fit **split every encoder weight
+            exactly** into the parts of the target that produced it in the
+            restored iteration: ``varm["BAE_encoder_weights_carry"]`` (the code
+            carried over from the previous iteration), ``..._recon`` (the
+            reconstruction gradient step) and ``..._design`` (what the design step
+            removed), which sum to ``varm["BAE_encoder_weights"]`` to the last bit.
+            ``uns["bae"]["selection_trace"]`` records, for the same iteration and
+            every boosting step, the selected gene, its coefficient increment
+            split the same way, the norms of the target parts, and the gene that
+            would have been selected at that step *without* the design step
+            (``counterfactual_gene["no_design"]``) or by the reconstruction
+            gradient alone (``["recon"]``), given the genes already entered. The
+            split is exact because boosting is linear in its target once the
+            selection path is fixed.
+
+            Read it with the mechanism in mind. The design step is a *filter*: it
+            removes within-group variation from the target rather than adding
+            between-group variation, so on the genes that win, its own additive
+            share is a small shrinkage and the between-group signal it protects
+            sits in the reconstruction part. Whether the design term *decided* a
+            selection is therefore the counterfactual column, not the sign of the
+            design part. On planted data at ``design_lambda=1`` the constrained
+            dimension recovered all ten condition genes, the design part opposed
+            the weight's sign on every one of them, and 79% of its boosting steps
+            would have gone to another gene without the design step.
+
+            Not combinable with a transfer model, a warm start or
+            ``boosting_independent=False`` in this release. The covariate is
+            never an encoder input, so :meth:`transform` stays gene-only.
+        design_dims
+            Latent dimensions the design loss acts on. Defaults to the first
+            ``min(q, latent_dim)`` dimensions, ``q`` being the number of encoded
+            design columns (levels minus one per categorical column, one per
+            numeric column): the design subspace has dimension ``q``, so more
+            constrained dimensions than that cannot all be design-explained and
+            mutually orthogonal. The remaining dimensions stay reconstruction-only.
         max_iterations
             Maximum training iterations (overrides config).
         early_stopping_patience
@@ -1692,9 +1990,37 @@ class BAE(nn.Module):
         if decoder_warmup_epochs < 0:
             raise ValueError(f"decoder_warmup_epochs must be >= 0, got {decoder_warmup_epochs}")
 
+        if design_key is None and design_dims is not None:
+            raise ValueError(
+                "design_dims was given without a design_key; there is nothing to separate"
+            )
+        if design_key is not None:
+            if init_pca or init_obsm is not None:
+                raise ValueError(
+                    "design_key cannot be combined with init_pca/init_obsm: the warm "
+                    "start would need its own component in the weight attribution"
+                )
+            if not self.config.boosting_independent:
+                raise ValueError(
+                    "design_key requires boosting_independent=True: the attribution "
+                    "replays the selection path per latent dimension, which shared "
+                    "boosting state across dimensions would corrupt"
+                )
+            if self.config.target_optim_lr * self.config.design_lambda > 1.0:
+                raise ValueError(
+                    f"target_optim_lr * design_lambda = "
+                    f"{self.config.target_optim_lr * self.config.design_lambda:.3g} exceeds 1. "
+                    "One step then overshoots the design subspace: the within-group "
+                    "residual comes back with its sign flipped, and since the selection "
+                    "criterion is squared its competitors regain their scores. Use a value "
+                    "in [0, 1/target_optim_lr]; 1 removes the residual completely."
+                )
+
         is_transfer = self._prior_weights is not None
         if is_transfer:
-            self._validate_transfer_fit(adata, init_obsm=init_obsm, init_pca=init_pca)
+            self._validate_transfer_fit(
+                adata, init_obsm=init_obsm, init_pca=init_pca, design_key=design_key
+            )
         elif decoder_warmup_epochs:
             raise ValueError(
                 "decoder_warmup_epochs only applies to a model built by "
@@ -1842,17 +2168,45 @@ class BAE(nn.Module):
             self.config.boosting_precompute_covcache, sourcemat_aug.shape[1]
         )
         self._precomputed_covcache = precompute_covcache
-        if precompute_covcache:
-            from ._utils import compute_covariance_cache
+        prior_dims = self._prior_weights.shape[1] if is_transfer else 0
+        boost = self._boost_inputs(
+            sourcemat_aug,
+            allboost_mandatory,
+            mandatory_ridge,
+            precompute=precompute_covcache,
+            prior_dims=prior_dims,
+        )
 
-            covcache = compute_covariance_cache(sourcemat_aug)
-        else:
-            covcache = None  # Lazy computation during allboost
+        # --- Design guidance: which dimensions, and the subspace they are pulled to ---
+        self._design_encoding = None
+        self._design_dims = None
+        design = None
+        if design_key is not None:
+            from ._utils import encode_obs_covariates
 
-        # `sourcemat_aug` is fixed for the whole fit, so its column norms are too.
-        # allboost recomputes them on every call otherwise -- an O(n*p) pass and a
-        # full-size temporary, once per training iteration.
-        boosting_col_norms_sq = column_norms_sq(sourcemat_aug)
+            design_columns = [design_key] if isinstance(design_key, str) else list(design_key)
+            self._design_encoding = encode_obs_covariates(adata, design_columns)
+            q = self._design_encoding.n_columns
+            dims = (
+                np.arange(min(q, self.config.latent_dim))
+                if design_dims is None
+                else np.asarray(design_dims, dtype=np.intp).ravel()
+            )
+            if (
+                dims.size == 0
+                or np.unique(dims).size != dims.size
+                or ((dims < 0) | (dims >= self.config.latent_dim)).any()
+            ):
+                raise ValueError(
+                    f"design_dims must be distinct indices in [0, {self.config.latent_dim}), "
+                    f"got {dims.tolist()}"
+                )
+            self._design_dims = dims
+            design = (
+                self._design_basis(self._design_encoding.encoded),
+                dims,
+                self.config.target_optim_lr * self.config.design_lambda,
+            )
 
         # Optimizer for decoder only
         decoder_optimizer = torch.optim.AdamW(
@@ -1883,7 +2237,6 @@ class BAE(nn.Module):
         # checkpoint selection, and `fit` would restore an encoder whose novel
         # columns are all zero — returning the prior unchanged, with no error, and
         # reading as "no novel structure found".
-        prior_dims = self._prior_weights.shape[1] if is_transfer else 0
         warmup_loss: float | None = None
         if is_transfer:
             W_start = np.zeros((self.config.latent_dim, self.n_genes), dtype=np.float32)
@@ -1911,6 +2264,8 @@ class BAE(nn.Module):
         best_decoder_state = None
         best_optimizer_state = None
         best_batch_weights = None
+        best_components = None
+        best_trace = None
 
         # Training loop
         self._training_history = {"train_loss": [], "selection_loss": []}
@@ -1931,71 +2286,20 @@ class BAE(nn.Module):
         )
 
         for iteration in pbar:
-            # STEP 1: Compute boosting targets via gradient step from current z
-            # targets = z - lr * ∂L_target/∂z (functional gradient descent).
-            # The warm start applies once: it seeds z on the first iteration only.
+            # STEPS 1-4: targets by a gradient step on z (the warm start seeds z on
+            # the first iteration only), orthogonalization, design filter, encoder
+            # reset and the boosting fit -- see `_boost_encoder`. With a design key
+            # the encoder is also split exactly into the parts of its target.
             diag_stats: dict[str, float] = {}
-            targets = self._compute_boosting_targets(
+            betamat, targets, components, trace = self._boost_encoder(
                 X_train,
-                lr=self.config.target_optim_lr,
-                obs_covariates=D_condition,
-                stats=diag_stats if collect_diagnostics else None,
+                D_condition,
+                boost,
                 z_override=z_init if iteration == 0 else None,
+                attribute=design is not None,
+                design=design,
+                stats=diag_stats if collect_diagnostics else None,
             )
-
-            # STEP 2 (optional): orthogonalize the targets across latent
-            # dimensions. The correlation method needs nothing here -- its
-            # penalty is already part of the objective computed in step 1.
-            if self.config.disentanglement == "orthogonal":
-                from ._utils import disentangle_boosting_targets
-
-                targets = disentangle_boosting_targets(
-                    targets, alpha=self.config.disentanglement_alpha
-                )
-
-            # STEP 3: Reset encoder weights before boosting (rebuild from scratch)
-            self.encoder.reset_weights()
-
-            # STEP 4: Fit encoder via boosting to map X → targets. On a transfer
-            # model the prior columns are either withheld ("frozen") or boosted
-            # from the fixed original matrix as an offset ("anchored").
-            fit_targets, beta_init, fit_mandatory = self._transfer_boosting_inputs(
-                targets, sourcemat_aug.shape[1], prior_dims, allboost_mandatory
-            )
-            if fit_targets.shape[1] == 0:
-                # Frozen transfer with no additional dimensions: nothing competes
-                # for selection, and only the decoder adapts to the new data.
-                betamat = np.zeros((0, sourcemat_aug.shape[1]), dtype=np.float64)
-            elif covcache is None:
-                betamat, covcache = allboost(
-                    sourcemat_aug,
-                    fit_targets,
-                    covcache=covcache,
-                    col_norms_sq=boosting_col_norms_sq,
-                    stepno=self.config.boosting_stepno,
-                    nu=self.config.boosting_nu,
-                    csf=self.config.boosting_csf,
-                    independent=self.config.boosting_independent,
-                    mandatory_features=fit_mandatory,
-                    mandatory_ridge=mandatory_ridge,
-                    beta_init=beta_init,
-                    return_covcache=True,
-                )
-            else:
-                betamat = allboost(
-                    sourcemat_aug,
-                    fit_targets,
-                    covcache=covcache,
-                    col_norms_sq=boosting_col_norms_sq,
-                    stepno=self.config.boosting_stepno,
-                    nu=self.config.boosting_nu,
-                    csf=self.config.boosting_csf,
-                    independent=self.config.boosting_independent,
-                    mandatory_features=fit_mandatory,
-                    mandatory_ridge=mandatory_ridge,
-                    beta_init=beta_init,
-                )
-            betamat = self._expand_transfer_betamat(betamat, sourcemat_aug.shape[1], prior_dims)
 
             # Extract gene weights only; obs weights are nuisance (discarded)
             W_genes = betamat[:, : self.n_genes]
@@ -2043,6 +2347,10 @@ class BAE(nn.Module):
                 # manufacture an inconsistency rather than continue a state.
                 best_optimizer_state = copy.deepcopy(decoder_optimizer.state_dict())
                 best_batch_weights = batch_weights
+                # The attribution must describe the encoder `fit` returns, which is
+                # this iteration's, not the last one's.
+                best_components = components
+                best_trace = trace
             else:
                 patience_counter += 1
 
@@ -2086,6 +2394,8 @@ class BAE(nn.Module):
             self.decoder.load_state_dict(best_decoder_state)
         self._decoder_optimizer_state = best_optimizer_state
         self._batch_weights = best_batch_weights
+        self._encoder_components = best_components
+        self._selection_trace = best_trace
 
         self._is_fitted = True
 
@@ -2254,7 +2564,6 @@ class BAE(nn.Module):
         equivalence so the two cannot silently diverge.
         """
         from ._utils import (
-            compute_covariance_cache,
             resolve_mandatory_genes,
             resolve_precompute_covcache,
             transform_obs_covariates,
@@ -2292,17 +2601,26 @@ class BAE(nn.Module):
         mandatory_ridge = np.zeros(sourcemat_aug.shape[1], dtype=np.float64)
         if n_nuisance:
             mandatory_ridge[self.n_genes :] = self.config.nuisance_ridge
-        # Fixed across every iteration recorded here, exactly as in `fit`.
-        boosting_col_norms_sq = column_norms_sq(sourcemat_aug)
+        prior_dims = self._prior_weights.shape[1] if self._prior_weights is not None else 0
         # Honour the same covariance-cache setting `fit` resolved. Without this,
         # the method documented as mirroring the fit loop would run a different
         # cache strategy from the fit it is analysing.
-        if resolve_precompute_covcache(
-            self.config.boosting_precompute_covcache, sourcemat_aug.shape[1]
-        ):
-            covcache_initial = compute_covariance_cache(sourcemat_aug)
-        else:
-            covcache_initial = None
+        boost = self._boost_inputs(
+            sourcemat_aug,
+            allboost_mandatory,
+            mandatory_ridge,
+            precompute=resolve_precompute_covcache(
+                self.config.boosting_precompute_covcache, sourcemat_aug.shape[1]
+            ),
+            prior_dims=prior_dims,
+        )
+        design = None
+        if self._design_encoding is not None:
+            design = (
+                self._design_basis(transform_obs_covariates(adata, self._design_encoding)),
+                self._design_dims,
+                self.config.target_optim_lr * self.config.design_lambda,
+            )
 
         # Snapshot so the fitted model is unchanged when this returns.
         saved_encoder = self.encoder.linear.weight.detach().clone()
@@ -2348,9 +2666,7 @@ class BAE(nn.Module):
 
         reference_unit = _unit_rows(reference)
 
-        covcache = covcache_initial
         latent_dim = reference.shape[0]
-        prior_dims = self._prior_weights.shape[1] if self._prior_weights is not None else 0
         counts = np.zeros((self.n_genes, latent_dim), dtype=np.float64)
         coef_sum = np.zeros((self.n_genes, latent_dim), dtype=np.float64)
         coef_sq_sum = np.zeros((self.n_genes, latent_dim), dtype=np.float64)
@@ -2365,45 +2681,10 @@ class BAE(nn.Module):
                 disable=not verbose,
                 unit="run",
             ):
-                # Mirrors the fit loop, steps 1-6. Kept in the same order; see
-                # `fit` for the authoritative sequence.
-                targets = self._compute_boosting_targets(
-                    X_train,
-                    lr=self.config.target_optim_lr,
-                    obs_covariates=D_condition,
-                )
-                if self.config.disentanglement == "orthogonal":
-                    from ._utils import disentangle_boosting_targets
-
-                    targets = disentangle_boosting_targets(
-                        targets, alpha=self.config.disentanglement_alpha
-                    )
-                self.encoder.reset_weights()
-                fit_targets, beta_init, fit_mandatory = self._transfer_boosting_inputs(
-                    targets, sourcemat_aug.shape[1], prior_dims, allboost_mandatory
-                )
-                if fit_targets.shape[1] == 0:
-                    betamat = np.zeros((0, sourcemat_aug.shape[1]), dtype=np.float64)
-                else:
-                    result = allboost(
-                        sourcemat_aug,
-                        fit_targets,
-                        covcache=covcache,
-                        col_norms_sq=boosting_col_norms_sq,
-                        stepno=self.config.boosting_stepno,
-                        nu=self.config.boosting_nu,
-                        csf=self.config.boosting_csf,
-                        independent=self.config.boosting_independent,
-                        mandatory_features=fit_mandatory,
-                        mandatory_ridge=mandatory_ridge,
-                        beta_init=beta_init,
-                        return_covcache=covcache is None,
-                    )
-                    if covcache is None:
-                        betamat, covcache = result
-                    else:
-                        betamat = result
-                betamat = self._expand_transfer_betamat(betamat, sourcemat_aug.shape[1], prior_dims)
+                # The same alternation as `fit`, steps 1-6; the boosting half is
+                # literally the same code. The recon/design split is not carried
+                # here: the targets do not depend on it, only the readout does.
+                betamat, _, _, _ = self._boost_encoder(X_train, D_condition, boost, design=design)
 
                 W_genes = betamat[:, : self.n_genes]
                 self.encoder.set_weights(
@@ -3209,22 +3490,29 @@ class BAE(nn.Module):
         if self._batch_weights is not None:
             uns_dict["batch_weights"] = self._batch_weights
             uns_dict["nuisance_ridge"] = self.config.nuisance_ridge
-        diagnostic_encoding = self._batch_encoding
-        if diagnostic_encoding is not None:
-            from ._utils import transform_obs_covariates
+        from ._utils import latent_r2_per_dim, transform_obs_covariates
 
-            design = transform_obs_covariates(adata, diagnostic_encoding)
-            centered_z = adata.obsm["X_bae"] - adata.obsm["X_bae"].mean(axis=0, keepdims=True)
-            fitted_z = design @ np.linalg.lstsq(design, centered_z, rcond=None)[0]
-            ss_total = (centered_z**2).sum(axis=0)
-            ss_residual = ((centered_z - fitted_z) ** 2).sum(axis=0)
-            latent_r2 = np.divide(
-                ss_residual,
-                ss_total,
-                out=np.full_like(ss_total, np.nan),
-                where=ss_total > 0,
+        if self._batch_encoding is not None:
+            uns_dict["latent_obs_r2_per_dim"] = latent_r2_per_dim(
+                transform_obs_covariates(adata, self._batch_encoding), latent
             )
-            uns_dict["latent_obs_r2_per_dim"] = 1.0 - latent_r2
+        if self._design_encoding is not None:
+            # Same statistic as the batch R² above, opposite goal: near one on the
+            # constrained dimensions means the design term did its job.
+            uns_dict["design_key"] = self._design_encoding.obs_columns
+            uns_dict["design_columns"] = self._design_encoding.encoded_columns
+            uns_dict["design_dims"] = np.asarray(self._design_dims, dtype=np.intp)
+            uns_dict["design_lambda"] = self.config.design_lambda
+            uns_dict["latent_design_r2_per_dim"] = latent_r2_per_dim(
+                transform_obs_covariates(adata, self._design_encoding), latent
+            )
+        if self._encoder_components is not None:
+            # Exact split of the encoder: these sum to varm["BAE_encoder_weights"] to
+            # within its float32 rounding. Kept in float64: the parts are float64 and
+            # casting each separately would break the identity in the last bit.
+            for name, W_part in self._encoder_components.items():
+                adata.varm[f"BAE_encoder_weights_{name}"] = np.ascontiguousarray(W_part.T)
+            uns_dict["selection_trace"] = copy.deepcopy(self._selection_trace)
 
         # Always recorded. A bare MSE is not interpretable on its own: on the
         # z-transformed input BAE expects, 1.0 is what predicting zero everywhere

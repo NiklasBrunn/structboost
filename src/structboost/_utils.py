@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -132,7 +133,8 @@ def disentangle_boosting_targets(
     targets: NDArray[np.floating],
     *,
     alpha: float = 1.0,
-) -> NDArray[np.floating]:
+    components: Sequence[NDArray[np.floating]] | None = None,
+) -> NDArray[np.floating] | tuple[NDArray[np.floating], list[NDArray[np.floating]]]:
     """Move the boosting targets toward the nearest mutually orthogonal set.
 
     Symmetric (Löwdin) orthogonalization: the orthogonal matrix closest to
@@ -174,12 +176,18 @@ def disentangle_boosting_targets(
         latent dimension.
     alpha
         Constraint strength in ``[0, 1]``; ``1.0`` (default) fully orthogonalizes.
+    components
+        Optional additive parts of ``targets`` (same shape each). When given, the
+        transform is applied as one right-multiplication computed from the
+        *total*, so that the transformed components still sum to the transformed
+        total. This is what lets :meth:`structboost.BAE.fit` attribute encoder
+        weights to the parts of the target that produced them.
 
     Returns
     -------
     Target matrix of the same shape. At ``alpha=1`` the columns are exactly
     mutually orthogonal up to floating-point error and each keeps its original
-    norm.
+    norm. With ``components``, a ``(targets, components)`` pair.
 
     Notes
     -----
@@ -199,16 +207,53 @@ def disentangle_boosting_targets(
     if not np.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
         raise ValueError(f"alpha must be finite and in [0, 1], got {alpha}")
     if targets.shape[1] == 1 or alpha == 0.0:
-        return targets.copy()
+        return (
+            targets.copy()
+            if components is None
+            else (targets.copy(), [c.copy() for c in components])
+        )
 
     work = np.asarray(targets, dtype=np.float64)
     norms = np.linalg.norm(work, axis=0)
     # `U @ Vt` is the orthogonal polar factor of `work`: orthonormal columns, and
     # the closest such matrix in Frobenius norm.
-    u, _, vt = np.linalg.svd(work, full_matrices=False)
-    orthogonal = (u @ vt) * norms
-    result = orthogonal if alpha == 1.0 else (1.0 - alpha) * work + alpha * orthogonal
-    return result.astype(targets.dtype, copy=False)
+    u, s, vt = np.linalg.svd(work, full_matrices=False)
+    if components is None:
+        orthogonal = (u @ vt) * norms
+        result = orthogonal if alpha == 1.0 else (1.0 - alpha) * work + alpha * orthogonal
+        return result.astype(targets.dtype, copy=False)
+
+    # Components: the same transform as a right-multiplication, so that additive
+    # parts of the target stay additive. `U Vt = T V S^-1 Vt`, hence
+    # `K = (1 - alpha) I + alpha V S^+ Vt diag(norms)` maps the total to the
+    # result above and each component to its share of it. `S^+` rather than
+    # `S^-1`: a rank-deficient total still maps instead of dividing by zero.
+    inv_s = np.where(s > s.max() * 1e-12, 1.0 / np.where(s > 0, s, 1.0), 0.0)
+    K = (vt.T * inv_s) @ vt * norms
+    if alpha != 1.0:
+        K = (1.0 - alpha) * np.eye(K.shape[0]) + alpha * K
+    return (
+        (work @ K).astype(targets.dtype, copy=False),
+        [(np.asarray(c, dtype=np.float64) @ K).astype(c.dtype, copy=False) for c in components],
+    )
+
+
+def latent_r2_per_dim(design: NDArray[np.floating], Z: NDArray[np.floating]) -> NDArray[np.float64]:
+    """Fraction of each latent dimension's variance explained by ``design``.
+
+    Least squares of the centred latent code on the (already standardized, hence
+    centred) design columns. For a categorical design this is the correlation
+    ratio, i.e. the between-group share of variance. Used both for
+    ``latent_obs_r2_per_dim`` (batch integration: near zero is the goal) and for
+    ``latent_design_r2_per_dim`` (design guidance: near one is the goal).
+    ``NaN`` for a constant dimension.
+    """
+    centered = Z - Z.mean(axis=0, keepdims=True)
+    fitted = design @ np.linalg.lstsq(design, centered, rcond=None)[0]
+    ss_total = (centered**2).sum(axis=0)
+    ss_residual = ((centered - fitted) ** 2).sum(axis=0)
+    ratio = np.divide(ss_residual, ss_total, out=np.full_like(ss_total, np.nan), where=ss_total > 0)
+    return 1.0 - ratio
 
 
 def _pca_scores(

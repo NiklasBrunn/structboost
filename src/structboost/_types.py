@@ -179,6 +179,54 @@ class BAEConfig:
         This is a starting point rather than a tuned optimum, and the right value
         is dataset-dependent. Sweep upward — ``1e-2, 3e-2, 1e-1, 3e-1`` — watching
         latent correlation against whatever downstream structure matters to you.
+    design_lambda
+        **Exploratory**, under active development.
+
+        Weight of the design loss used when :meth:`BAE.fit` is given a
+        ``design_key``; ignored otherwise. The loss is the latent variance the
+        design does not explain, on the constrained dimensions only::
+
+            L_design = ½ Σ_{k ∈ design_dims} ||(I - P) z_k||²
+
+        summed over cells like the reconstruction target, with ``P`` the
+        projection onto the encoded design columns (plus an intercept). Its
+        gradient is ``(I - P) z_k``, so the design part of the boosting target is
+        ``-target_optim_lr * design_lambda * (I - P) t_k``: it removes that
+        fraction of the within-group residual from the target and leaves the
+        design-explained part untouched. The step is taken on the target after
+        the reconstruction step and the orthogonalization, so the constraint is
+        exact on the constrained dimensions and the orthogonality between
+        constrained and free dimensions becomes approximate.
+
+        **The range is ``[0, 1/target_optim_lr]``**, i.e. ``[0, 1]`` at the
+        default step size: the factor left on the residual is ``1 - lr * lambda``,
+        which is zero at ``1`` (the target becomes exactly the design-explained
+        part, e.g. the group means) and negative beyond it, where ``fit`` raises:
+        a sign-flipped residual scores just as high under the squared selection
+        criterion, so competitors come straight back.
+
+        **Expect the effect to switch on close to 1 when the design effect is
+        subtle.** Selection compares squared scores, so halving the within-group
+        residual only quarters a competitor's score, and a weak between-group
+        signal still loses. On planted data (1,000 cells, 500 genes, ten condition
+        genes shifted by one standard deviation, three seeds) ``0.25`` and ``0.5``
+        left the constrained dimension unchanged — design R² 0.001, as at ``0`` —
+        while ``1`` recovered all ten genes with precision and recall 1.0 and
+        design R² 0.72; shuffled labels at ``1`` gave R² 0.12 over 29 genes, the
+        null to compare against. Sweep ``1``, ``0.9``, ``0.75`` downward rather
+        than upward from small values.
+
+        Because the loss is quadratic with unit curvature it *filters*
+        within-group variance rather than amplifying between-group variance, so
+        the latent scale cannot blow up and a dimension whose target carries no
+        design signal is simply left small. What a high value produces is a sparse
+        linear predictor of the design group means: useful, but three cautions
+        apply. A batch confounded with the design will be selected as design
+        unless ``batch_key`` is also given; the term will find *some* genes
+        correlated with any labelling, so a fit on shuffled labels is the honest
+        null; and cell type as the design variable mostly re-labels what
+        reconstruction already separates. Numeric design columns give a linear
+        trend, not groups — pass timepoints as a categorical column for groups.
     target_optim_lr
         Step size for computing boosting targets via gradient descent on z.
         Targets are computed as z* = z - lr * ∂L_target/∂z (single gradient step),
@@ -282,6 +330,7 @@ class BAEConfig:
     disentanglement: Literal["none", "correlation", "orthogonal"] = "orthogonal"
     disentanglement_alpha: float = 1.0
     disentanglement_lambda: float = 1e-2
+    design_lambda: float = 1.0
     # Target computation
     target_optim_lr: float = 1.0
     # Training parameters
@@ -334,6 +383,8 @@ class BAEConfig:
             0.0 <= self.disentanglement_alpha <= 1.0
         ):
             raise ValueError("disentanglement_alpha must be finite and in [0, 1]")
+        if not np.isfinite(self.design_lambda) or self.design_lambda < 0:
+            raise ValueError("design_lambda must be finite and >= 0")
         if self.decoder_weight_decay < 0:
             raise ValueError("decoder_weight_decay must be >= 0")
         if self.max_iterations < 1:

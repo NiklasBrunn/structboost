@@ -69,7 +69,13 @@ MAGIC = "structboost.bae"
 #: 0.3.0 this breaks files written by a released version (0.4.0) and no migration
 #: is written — the setting no longer exists, so there is nothing to migrate it
 #: to, and a checkpoint is cheap to regenerate.
-CHECKPOINT_FORMAT = 6
+#:
+#: 7 — added ``BAEConfig.design_lambda`` and the design-guidance state
+#: (``design_encoding``, ``design_dims``, ``encoder_components``,
+#: ``selection_trace``). The bump is for *forward* compatibility only: an older
+#: install would fail on the new config key. Format-6 files still load, since
+#: every new key defaults to "no design guidance" when absent.
+CHECKPOINT_FORMAT = 7
 #: Oldest format this install can read.
 MIN_CHECKPOINT_FORMAT = 6
 
@@ -127,6 +133,15 @@ def _tensor(array: Any) -> Any:
 def _array(tensor: Any) -> np.ndarray:
     """Convert a checkpoint tensor back to a NumPy array."""
     return tensor.cpu().numpy()
+
+
+def _map_leaves(obj: Any, fn: Any) -> Any:
+    """Apply ``fn`` to every non-dict leaf of a nested dict (the selection trace)."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return {str(k): _map_leaves(v, fn) for k, v in obj.items()}
+    return fn(obj)
 
 
 def _encode_categories(column: str, categories: list) -> dict[str, Any]:
@@ -262,6 +277,10 @@ def build_payload(model: BAE) -> dict[str, Any]:
         "mandatory_genes": _to_primitive(model._mandatory_genes),
         "prior_weights": None if prior is None else _tensor(prior),
         "prior_info": _to_primitive(model._prior_info, coerce_unknown=True),
+        "design_encoding": _encode_encoding(model._design_encoding),
+        "design_dims": _to_primitive(model._design_dims),
+        "encoder_components": _map_leaves(model._encoder_components, _tensor),
+        "selection_trace": _map_leaves(model._selection_trace, _tensor),
         "latent_scaling": (
             None
             if scaling is None
@@ -321,6 +340,12 @@ def restore_payload(cls: type[BAE], payload: dict[str, Any], device: Any) -> BAE
     prior = payload["prior_weights"]
     model._prior_weights = None if prior is None else _array(prior)
     model._prior_info = dict(payload["prior_info"])
+    # `.get`: format-6 checkpoints predate design guidance.
+    model._design_encoding = _decode_encoding(payload.get("design_encoding"))
+    dims = payload.get("design_dims")
+    model._design_dims = None if dims is None else np.asarray(dims, dtype=np.intp)
+    model._encoder_components = _map_leaves(payload.get("encoder_components"), _array)
+    model._selection_trace = _map_leaves(payload.get("selection_trace"), _array)
     scaling = payload["latent_scaling"]
     model._latent_scaling = (
         None
