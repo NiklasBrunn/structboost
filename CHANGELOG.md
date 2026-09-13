@@ -160,7 +160,13 @@ the intercept is now removed from the kept part too, which is zero on centred
 data. On the planted data with a second orthogonal variable, the two blocks reached
 R² 0.72 each and recovered their own ten genes with precision and recall 1.0 and
 none of the other's; `design_lambda={"sex": 0}` switched the sex block off
-(R² 0.002, nothing selected) with the condition block unchanged.
+(R² 0.002, nothing selected) with the condition block unchanged. On the Wilk
+cohort, where every COVID-19 donor is male, `design_key={"disease": [0], "sex":
+[1]}` moved XIST from the disease block, whose top gene it had been, to the top
+of the sex block, with the disease dimension alone still at within-cell-type
+AUROC 0.88; and the decomposition of the plain fit put the between-disease
+residual variance on the complement and interferon monocyte genes (C1QA/B/C,
+SOCS3, FCGR1A, CLEC4C), 0.17% of the residual against 99.3% within.
 
 
 `plot_selection_trace` and `plot_selection_paths` gain `decided_by`, the part

@@ -277,8 +277,12 @@ blocks, the conservative choice: a block cannot carry signal the data cannot
 tell apart from another variable's. On the Wilk cohort, where every COVID-19
 donor is male and two of the six healthy donors are female, sex and disease
 share most of their between-group variance, and `design_key={"disease": [0],
-"sex": [1]}` gives each block only the part the other cannot explain
-(see below). On the same planted data with the second variable,
+"sex": [1]}` gives each block only the part the other cannot explain: XIST,
+the top gene of the single-variable disease dimension in the section above,
+leaves the disease block and heads the sex block, while the disease dimension
+alone still separates the conditions within cell types at AUROC 0.88 (R² 0.42;
+the sex block R² 0.29, since the only sex contrast the data can attribute to
+sex is among the healthy donors). On the same planted data with the second variable,
 `design_key=["cond", "sex"]` gave two blocks of R² 0.72 that each recovered
 their own ten genes with precision and recall 1.0 and none of the other's, and
 `design_lambda={"sex": 0}` switched the sex block off (R² 0.002, nothing
@@ -357,6 +361,16 @@ is the number the design term is up against. With a second, orthogonal planted
 variable and `decompose_within="stage"`, the between-sex part picked a sex gene
 on 94% of the steps, the strata part a marker gene on every step, and `shared`
 stayed below 0.002 of any gene's residual variance.
+
+On the Wilk cohort, `decompose_key=["disease", "sex"]` with
+`decompose_within="cell_type"` on the plain fit says why disease needs a design
+term there: at the restored iteration the design explains 0.3% of the residual
+variance (between-disease 0.17%, between-sex 0.12%, shared 0.03%) and the
+cell-type main effect 0.4%, the rest is within. The genes whose residual
+variance sits between the conditions are the complement and interferon
+monocyte programme, C1QA, C1QB, C1QC, SOCS3, FCGR1A and CLEC4C; between the
+sexes XIST and an eosinophil and basophil set (CLC, HDC, CCR3, GATA2, MS4A3);
+and the shared column, XIST and HLA-DQB1, is the confounding made visible.
 
 ```python
 plot_selection_trace(adata, dims=[0])                               # hollow marker: without the design variance, another gene
