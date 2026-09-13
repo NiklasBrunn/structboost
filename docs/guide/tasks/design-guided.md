@@ -2,9 +2,9 @@
 
 :::{admonition} Exploratory
 :class: caution
-New in 0.7.0 and measured on simulated data only. The mechanism and the
-readout are exact; what is not yet known is how it behaves on real experimental
-designs. Expect defaults and names to move.
+New in 0.7.0, measured on simulated data and on one real cohort (below). The
+mechanism and the readout are exact; how it behaves across experimental designs
+is not yet known. Expect defaults and names to move.
 :::
 
 ```python
@@ -83,6 +83,36 @@ already separates. A numeric design column gives a linear trend, not groups; pas
 timepoints as a categorical column for groups.
 :::
 
+### On a real cohort
+
+Wilk et al. 2020 (PBMCs, seven COVID-19 patients and six healthy donors, 44k
+cells after QC, 2,000 HVGs, ten latent dimensions, defaults with 400
+iterations). Disease is nested in donor, so no donor covariate was given; the
+number to read is the disease AUROC *within* cell types.
+
+| | within-cell-type disease AUROC | cell-type kNN accuracy |
+| --- | --- | --- |
+| PCA, 10 components | 0.88 | 0.82 |
+| scVI, 10 dimensions | 0.95 | 0.88 |
+| BAE, plain | 0.80 | 0.79 |
+| BAE, `design_key="disease"` | 0.90 (0.88 from dimension 0 alone) | 0.78 |
+| shuffled labels | dimension 0 alone: 0.53 | 0.78 |
+
+The design dimension held 24 genes: an interferon block (IFI27, IFI44, IFI44L,
+IFI6, IFIT3, MX1, XAF1), the plasmablast expansion (IGHG1, IGHG4, IGLC3, JCHAIN),
+the CD16 monocyte and class II changes (FCGR3A, MS4A7, HLA-DQB1), S100A8 and
+S100A9, SOCS3 and cytotoxic markers — the paper's headline findings in one
+dimension. 96% of its boosting steps were decided by the design term; the
+interferon genes entered on both objectives (rank 0 without the design step),
+S100A8, GNLY and SOCS3 only because of it (ranks 69, 612 and 390). The other
+nine dimensions and the reconstruction quality were unchanged. XIST was selected
+too: sex is unbalanced between the cohorts, and the term finds any gene that
+tracks the labels, so a sex covariate belongs in `batch_key` on such a cohort.
+Donor as `batch_key` removed the disease signal entirely, from the BAE and from
+scVI alike, as nesting predicts. With 1,000 iterations, `boosting_nu=0.3`,
+`batch_size=1024` and a `(64, 128)` decoder every BAE arm improved (guided 0.92,
+dimension 0 alone 0.90, plain 0.82) at about twice the genes per dimension.
+
 ## Heterogeneous data: keep the effect inside each cell type
 
 When cell-type composition differs between conditions, a dimension that
@@ -105,6 +135,15 @@ Disease nested in donor, as in a case-control cohort, is the situation where
 this matters most, and it is also the situation where a donor `batch_key` must
 *not* be given: every donor is one condition, so mandatory donor regressors in
 the boosting fit absorb the disease effect entirely.
+
+On the Wilk cohort the stratified form concentrated the design dimension on the
+myeloid response: AUROC 0.97 within CD14 monocytes and 0.93 within dendritic
+cells and neutrophils, 0.65 to 0.77 within lymphocytes, with FCGR1A, CSF3R,
+MS4A7, TMEM176B and SOCS3 replacing the immunoglobulin and cytotoxic genes of
+the unstratified dimension. Removing the cell-type main effect drops the
+pan-lymphoid interferon component, so the pooled separation is lower (0.86
+against 0.90) while the within-monocyte readout is sharper. Which is wanted
+depends on the question.
 
 `design_dims` defaults to the first `min(q, latent_dim)` dimensions, `q` being the
 number of encoded design columns (levels minus one per categorical column). The
