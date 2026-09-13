@@ -282,7 +282,10 @@ the top gene of the single-variable disease dimension in the section above,
 leaves the disease block and heads the sex block, while the disease dimension
 alone still separates the conditions within cell types at AUROC 0.88 (R² 0.42;
 the sex block R² 0.29, since the only sex contrast the data can attribute to
-sex is among the healthy donors). On the same planted data with the second variable,
+sex is among the healthy donors). With `design_within="cell_type"` as well, the
+disease block keeps the myeloid programme of the stratified section, IFI27,
+SOCS3, FCGR1A and TMEM176B at AUROC 0.98 within CD14 monocytes, and XIST still
+heads the sex block. On the same planted data with the second variable,
 `design_key=["cond", "sex"]` gave two blocks of R² 0.72 that each recovered
 their own ten genes with precision and recall 1.0 and none of the other's, and
 `design_lambda={"sex": 0}` switched the sex block off (R² 0.002, nothing
