@@ -387,7 +387,23 @@ _TICK, _LABEL, _TITLE, _LEGEND = 9.0, 9.5, 10.5, 11.0
 #: of points draws a shape the data does not support.
 _MIN_GROUP = 10
 #: Relative panel widths, so a three-panel row still reads.
-_WIDTH = {"scores": 1.35, "contributions": 1.0, "weights": 0.8, "shares": 1.0, "groups": 1.0}
+_WIDTH = {
+    "scores": 1.35,
+    "contributions": 1.0,
+    "weights": 0.8,
+    "shares": 1.0,
+    "attribution": 1.0,
+    "groups": 1.0,
+}
+#: Colours of the encoder-weight parts in the attribution panel and trace plot.
+#: Deliberately neither of the sign colours above, which keep their meaning.
+_PART_COLORS = {
+    "total": _INK,
+    "carry": "#CFCFCF",
+    "recon": "#7F7F7F",
+    "design": "#009E73",
+    "correlation": "#CC79A7",
+}
 
 
 def _palette_for(n_groups: int) -> tuple[str, ...]:
@@ -776,6 +792,33 @@ def _draw_weights(ax, w, names, rank, n_genes) -> str:
     return "x"
 
 
+def _draw_attribution(ax, parts, w, names, rank, n_genes) -> str:
+    """Each top gene's weight split into the parts that produced it.
+
+    The parts are exact and additive (see ``BAE.fit(design_key=...)``), so they
+    are drawn side by side rather than stacked: a gene the design term pushed
+    *against* reconstruction has parts of opposite sign, which a stack would hide.
+    """
+    order = np.argsort(np.abs(rank))[::-1][:n_genes][::-1]
+    n_parts = len(parts)
+    height = 0.8 / n_parts
+    for i, (name, values) in enumerate(parts.items()):
+        ax.barh(
+            np.arange(order.size) + (i - (n_parts - 1) / 2) * height,
+            values[order],
+            height=height,
+            color=_PART_COLORS.get(name, _OTHER),
+        )
+    _zero(ax, "x")
+    ax.set_yticks(np.arange(order.size))
+    ax.set_yticklabels([_elide(names[i], 20) for i in order], fontsize=_TICK)
+    for label, i in zip(ax.get_yticklabels(), order, strict=True):
+        label.set_color(_POS if w[i] >= 0 else _NEG)
+    ax.set_title("weight by source", fontsize=_TITLE, loc="left", color=_INK)
+    ax.set_xlabel("weight", fontsize=_LABEL, color=_MUTED)
+    return "x"
+
+
 def _draw_shares(ax, shares, weights, sort_by, n_genes) -> str:
     """Every selected gene's share of the dimension, as a sorted profile.
 
@@ -975,7 +1018,8 @@ def plot_latent_dimensions(
         raise ValueError(f"dims out of range for a {Z.shape[1]}-dimensional code: {dims}")
 
     X = W = names = None
-    if {"contributions", "weights", "shares"} & set(panels):
+    parts: dict[str, np.ndarray] = {}
+    if {"contributions", "weights", "shares", "attribution"} & set(panels):
         if weights_key not in adata.varm:
             raise KeyError(f"adata.varm[{weights_key!r}] not found; needed for gene panels")
         W = np.asarray(adata.varm[weights_key], dtype=np.float64)
@@ -987,6 +1031,18 @@ def plot_latent_dimensions(
             if gene_names
             else np.asarray(adata.var_names, dtype=str)
         )
+    if "attribution" in panels:
+        prefix = f"{weights_key}_"
+        parts = {
+            key[len(prefix) :]: np.asarray(adata.varm[key], dtype=np.float64)
+            for key in adata.varm
+            if key.startswith(prefix)
+        }
+        if not parts:
+            raise KeyError(
+                f"no adata.varm[{prefix}*] found; the attribution panel needs a model "
+                "fitted with design_key"
+            )
 
     labels = colors = keep = lut = None
     n_other = 0
@@ -1016,7 +1072,7 @@ def plot_latent_dimensions(
     # the gene and group panels each need one tick per entry, and at a fixed height
     # their labels collide as soon as either exceeds about eight.
     rows_needed = max(
-        n_genes if {"contributions", "weights", "shares"} & set(panels) else 0,
+        n_genes if {"contributions", "weights", "shares", "attribution"} & set(panels) else 0,
         max_groups if "groups" in panels else 0,
         6,
     )
@@ -1047,7 +1103,7 @@ def plot_latent_dimensions(
             ax = axes[row][col]
             if panel == "scores":
                 grid = _draw_scores(ax, z, colors, size, dim, rng)
-            elif panel in ("contributions", "weights", "shares"):
+            elif panel in ("contributions", "weights", "shares", "attribution"):
                 w = W[:, dim]
                 nz = np.flatnonzero(w)
                 if nz.size == 0:
@@ -1071,6 +1127,15 @@ def plot_latent_dimensions(
                 rank = shares if rank_by == "share" else w[nz]
                 if panel == "weights":
                     grid = _draw_weights(ax, w[nz], names[nz], rank, n_genes)
+                elif panel == "attribution":
+                    grid = _draw_attribution(
+                        ax,
+                        {n: P[nz, dim] for n, P in parts.items()},
+                        w[nz],
+                        names[nz],
+                        rank,
+                        n_genes,
+                    )
                 elif panel == "shares":
                     grid = _draw_shares(ax, shares, w[nz], rank_by, n_genes)
                 else:
@@ -1097,7 +1162,7 @@ def plot_latent_dimensions(
             # overwrite the per-gene label colours the panels set below.
             ax.tick_params(color=_MUTED, labelsize=_TICK, length=3)
             ax.tick_params(axis="x", labelcolor=_MUTED)
-            if panel not in ("contributions", "weights"):
+            if panel not in ("contributions", "weights", "attribution"):
                 ax.tick_params(axis="y", labelcolor=_MUTED)
             ax.grid(axis=grid, color="#f2f2f2", lw=0.6)
             ax.set_axisbelow(True)
@@ -1140,7 +1205,13 @@ def plot_latent_dimensions(
                 label=(f"{_plural(n_grey, 'further group')} (labelled in the violins)"),
             )
         )
-    handles = handles + split_key
+    part_key = [
+        Patch(
+            facecolor=_PART_COLORS.get(n, _OTHER), edgecolor="none", label=f"{n} part of the weight"
+        )
+        for n in parts
+    ]
+    handles = handles + split_key + part_key
     if handles:
         fig.legend(
             handles=handles,
@@ -1606,3 +1677,139 @@ def plot_dimension_correlation(
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     fig.tight_layout()
     return fig, ax
+
+
+def plot_selection_trace(
+    adata,
+    *,
+    dims: Sequence[int] | None = None,
+    gene_names: str | None = None,
+    figsize: tuple[float, float] | None = None,
+    dpi: int = 150,
+):
+    """Boosting-step trace of the restored iteration, one axis per latent dimension.
+
+    Reads ``adata.uns["bae"]["selection_trace"]``, written by
+    :meth:`structboost.BAE.fit` when a ``design_key`` is given. For every
+    boosting step it shows the cumulative coefficient increment the selected
+    gene received, split into the exact parts of the target that produced it
+    (the carried-over code, the reconstruction step, the design step, and under
+    correlation disentanglement that penalty's step),
+    with the gene's name at the step. A hollow marker flags a step at which the
+    target *without* the design step, given the genes already entered, would
+    have selected a different gene: the steps where the design term changed the
+    selection.
+
+    The increments are per step and per selected gene, so a gene selected at
+    several steps appears at each of them; ``varm["BAE_encoder_weights_*"]``
+    holds the per-gene totals and :func:`plot_latent_dimensions` draws them with
+    ``panels=("attribution",)``.
+
+    Parameters
+    ----------
+    adata
+        Fitted AnnData carrying ``uns["bae"]["selection_trace"]``.
+    dims
+        Latent dimensions to draw; default all.
+    gene_names
+        ``adata.var`` column to label genes by; default ``var_names``.
+    figsize, dpi
+        Figure size (default scales with the number of dimensions) and resolution.
+
+    Returns
+    -------
+    fig, axes
+        The figure and its ``(n_dims,)`` array of axes.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    trace = adata.uns.get("bae", {}).get("selection_trace")
+    if trace is None:
+        raise KeyError(
+            "adata.uns['bae']['selection_trace'] not found; it is written by "
+            "BAE.fit(design_key=...)"
+        )
+    gene = np.asarray(trace["gene"])
+    latent_dim, stepno = gene.shape
+    dims = list(range(latent_dim)) if dims is None else list(dims)
+    if any(d < 0 or d >= latent_dim for d in dims):
+        raise ValueError(f"dims out of range for a {latent_dim}-dimensional code: {dims}")
+    names = (
+        np.asarray(adata.var[gene_names], dtype=str)
+        if gene_names
+        else np.asarray(adata.var_names, dtype=str)
+    )
+    counter = np.asarray(trace["counterfactual_gene"]["no_design"])
+    steps = np.arange(1, stepno + 1)
+
+    fig, axes = plt.subplots(
+        len(dims),
+        1,
+        figsize=figsize or (max(6.0, 0.28 * stepno), 2.2 * len(dims) + 0.8),
+        dpi=dpi,
+        squeeze=False,
+        sharex=True,
+    )
+    axes = axes[:, 0]
+    for ax, dim in zip(axes, dims, strict=True):
+        ran = gene[dim] >= 0
+        for name, delta in trace["delta"].items():
+            ax.step(
+                steps[ran],
+                np.cumsum(np.asarray(delta)[dim][ran]),
+                where="mid",
+                color=_PART_COLORS.get(name, _OTHER),
+                lw=1.8 if name == "total" else 1.2,
+                label=name,
+            )
+        total = np.cumsum(np.asarray(trace["delta"]["total"])[dim])
+        changed = ran & (counter[dim] != gene[dim])
+        ax.scatter(
+            steps[changed],
+            total[changed],
+            s=34,
+            facecolor="white",
+            edgecolor=_INK,
+            zorder=3,
+        )
+        for s, y in zip(steps[ran], total[ran], strict=True):
+            ax.annotate(
+                _elide(names[gene[dim, s - 1]], 12),
+                (s, y),
+                xytext=(0, 5),
+                textcoords="offset points",
+                fontsize=_TICK - 2,
+                rotation=60,
+                ha="left",
+                va="bottom",
+                color=_MUTED,
+            )
+        _zero(ax, "y")
+        ax.set_title(f"dim {dim}", fontsize=_TITLE, loc="left", color=_INK)
+        ax.set_ylabel("cumulative increment", fontsize=_LABEL, color=_MUTED)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.tick_params(color=_MUTED, labelsize=_TICK, labelcolor=_MUTED, length=3)
+    axes[-1].set_xlabel("boosting step", fontsize=_LABEL, color=_MUTED)
+    handles = [
+        Line2D([], [], color=_PART_COLORS.get(n, _OTHER), lw=1.6, label=n) for n in trace["delta"]
+    ] + [
+        Line2D(
+            [],
+            [],
+            marker="o",
+            ls="",
+            markerfacecolor="white",
+            markeredgecolor=_INK,
+            label="design step decided the pick",
+        )
+    ]
+    fig.legend(
+        handles=handles,
+        loc="upper center",
+        ncol=min(5, len(handles)),
+        frameon=False,
+        fontsize=_TICK,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    return fig, axes

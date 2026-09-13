@@ -64,6 +64,7 @@ __all__ = [
     "plot_dimension_correlation",
     "plot_dimension_gene_umaps",
     "plot_latent_dimensions",
+    "plot_selection_trace",
     "plot_top_boosting_coefficients",
     "plot_training_diagnostics",
     "read_encoder_weights",
@@ -86,6 +87,7 @@ _PLOT_FUNCTIONS = frozenset(
         "plot_dimension_correlation",
         "plot_dimension_gene_umaps",
         "plot_latent_dimensions",
+        "plot_selection_trace",
         "plot_top_boosting_coefficients",
         "plot_training_diagnostics",
     }
