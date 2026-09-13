@@ -252,13 +252,107 @@ The per-step increments of a dimension sum to its coefficients, so the trace plo
 is the coefficient column of the panel unrolled in time. The parts are drawn
 side by side rather than stacked because they can have opposite signs.
 
+## Several design variables: one block each
+
+With several variables every variable gets its own block of dimensions. The list
+form assigns consecutive blocks in order, each as wide as the variable's encoded
+columns; the dict form assigns them explicitly. `design_lambda` may be a dict
+with one strength per variable; variables it does not name get `1`.
+
+```python
+model.fit(adata, design_key=["condition", "disease"])          # condition -> dims [0, 1], disease -> [2]
+model.fit(adata, design_key={"condition": [0, 1], "disease": [4]})
+BAEConfig(design_lambda={"condition": 1.0, "disease": 0.5})    # a float still applies to all
+
+adata.uns["bae"]["design_blocks"]                # {variable: dims}
+adata.uns["bae"]["design_lambda"]                # {variable: strength}
+adata.uns["bae"]["latent_design_r2_per_block"]   # each block's dims scored against its own variable
+```
+
+A block keeps the part of the target its variable explains *beyond* the other
+design variables, `P_J − P_{J∖v}` with `J` the joint design: the unique part.
+For one variable this is the projector of the previous sections. For two
+confounded variables it means that what they share is filtered out of *both*
+blocks, the conservative choice: a block cannot carry signal the data cannot
+tell apart from another variable's. On the Wilk cohort, where every COVID-19
+donor is male and two of the six healthy donors are female, sex and disease
+share most of their between-group variance, and `design_key={"disease": [0],
+"sex": [1]}` gives each block only the part the other cannot explain
+(TODO_BLOCKS). `design_dims` remains valid for a single variable; with several,
+use the dict.
+
+## Where does a gene's score come from? The decomposition
+
+The design term above changes the fit. The decomposition does not: it reads the
+*plain* fit's reconstruction gradient through the design variables and says,
+for every boosting step, how much of the selected gene's score came from
+residual variance the design explains, and which gene that part alone would
+have picked. It measures what a design term would be up against, in the
+unguided model, and it works on a guided fit too, where it splits the
+reconstruction part.
+
+```python
+model.fit(adata, decompose_key="disease")
+model.fit(adata, decompose_key=["disease", "sex"], decompose_within="cell_type")
+
+adata.varm["BAE_encoder_weights_between_disease"]   # + "_between_sex", "_shared", "_strata" (or "_mean"), "_within", "_carry"
+adata.varm["BAE_residual_variance_share"]           # (n_genes, n_parts): each gene's residual sum of squares, split the same way
+adata.uns["bae"]["residual_variance_share_parts"]   # the column names
+adata.uns["bae"]["selection_trace"]                 # the same fields as above, keyed by these parts
+```
+
+The mathematics is Pythagoras. With `R = D(z) − X` the residual matrix and
+`Q_S` an orthonormal basis of the subspace spanned by the encoded columns of a
+set of design variables `S` (plus the intercept, or the stratum indicators
+under `decompose_within`), the reconstruction loss `L = (1/p)‖R‖²` splits
+exactly into `G_S = (1/p)‖Q_SᵀR‖²`, the residual sum of squares the design
+explains, and `L − G_S`, the rest. The gradients split the same way, so the
+boosting target splits into additive parts and the per-gene selection scores
+`xⱼᵀr` add across parts — measured to 6e-8 and 9e-7 relative on the real
+decoder. For several variables the split is a commonality analysis:
+`between_v = G_J − G_{J∖v}` is what `v` explains beyond the others,
+`shared = (G_J − G_∅) − Σ_v between_v` what they explain jointly but no one
+uniquely, `mean` (or `strata`) the column means of the residual (the decoder's
+bias miss, zero on centred data) or the stratum main effect, and
+`within = L − G_J`. One extra backward pass per distinct subset, so for `m`
+variables `m + 2` passes.
+
+Three caveats. It decomposes the *residual*, not the data: early in training
+the between part is the design-explained variance of the genes, later it is
+the design-explained part of what the model still misses. It is exact for the
+squared loss only. And `shared` can be negative under suppression and is large
+when variables are confounded, which is information about the design, not a
+defect of the split.
+
+Read it as before: the parts are additive in the scores, but the pick is the
+argmax of their sum, so *which part decided* is the counterfactual column.
+`counterfactual_gene["between_disease"]` is the gene the between-disease
+residual alone would have selected given the genes already entered; where the
+plain fit's pick differs from it, reconstruction went elsewhere, and
+`rank["between_disease"]` says how far down that part had the winner.
+`BAE_residual_variance_share` is the per-gene version: the share of a gene's
+residual variance that sits between the design groups, a design-free score of
+every gene, not only the selected ones.
+
+TODO_DECOMP_NUMBERS
+
+```python
+plot_selection_trace(adata, dims=[0], decided_by="within")          # hollow marker: within alone would have picked another gene
+plot_selection_paths(adata, dims=[0], decided_by="between_disease")
+```
+
+`decided_by` names the part to flag against and defaults to `no_design` when a
+design term is on, else `within`.
+
 ## Cost
 
 The parts ride along as extra target columns in the same `allboost` call, sharing
-the covariance cache and the single predictor–target product. Measured at 2,000
-cells and 2,000 or 5,000 genes over 20 iterations, the fit time with a
-`design_key` was within run-to-run noise of the plain fit. The stored trace is a
-few `(latent_dim, stepno)` arrays.
+the covariance cache; the leaders' predictor–target product is computed apart
+from the followers' so that the fit stays bitwise the plain one. Measured at
+2,000 cells and 2,000 or 5,000 genes over 20 iterations, the fit time with a
+`design_key` was within run-to-run noise of the plain fit. The decomposition
+adds one backward pass per subset of its variables (TODO_COST). The stored trace
+is a few `(latent_dim, stepno)` arrays plus the `(n_genes, n_parts)` shares.
 
 ## Not in this release
 

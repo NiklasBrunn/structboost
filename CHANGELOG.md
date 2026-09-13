@@ -109,12 +109,54 @@ by side rather than stacked since the parts can have opposite signs; the trace
 plot unrolls a dimension's boosting steps in time, with a hollow marker where
 the design step decided the pick.
 
+**New `BAE.fit(decompose_key=..., decompose_within=...)`: where a gene's score
+comes from, in the plain fit.** The design term changes the fit; this reads it.
+With `R = D(z) − X` and `Q_S` an orthonormal basis of the design subspace of a
+set of variables `S`, the reconstruction loss `(1/p)‖R‖²` splits exactly into
+`G_S = (1/p)‖Q_SᵀR‖²`, the residual sum of squares the design explains, and the
+rest; so does its gradient, so the boosting target splits into additive parts
+whose per-gene scores add (6e-8 and 9e-7 relative on the real decoder). For
+several variables the split is a commonality analysis: `between_<v>` is what `v`
+explains beyond the others, `shared` what they explain jointly but none
+uniquely, `mean` (or `strata` with `decompose_within`) the residual's column
+means or the stratum main effect, `within` the rest. The fit is bitwise the
+plain fit — the total gradient is still taken from the total loss, and `allboost`
+now runs the leaders' and the followers' initial predictor–target products
+separately because a gemm's rounding depends on its width, which the replay
+tests with three extra followers had not exposed. The trace then records, for
+every boosting step, the pick each part alone would have made and the winner's
+rank under it; `varm["BAE_encoder_weights_<part>"]` hold the weight parts and
+`varm["BAE_residual_variance_share"]` splits every gene's residual sum of squares
+the same way, a design-free score of every gene, selected or not. TODO_DECOMP_CL
+It decomposes the residual, not the data, is exact for the squared loss only,
+and `shared` is large when variables are confounded, which is information about
+the design rather than a defect of the split.
+
+**Several design variables get one block of dimensions each, and one strength
+each.** `design_key` as a list assigns consecutive blocks in order, as wide as
+each variable's encoded columns; as a dict `{variable: [dims]}` explicitly.
+`design_lambda` accepts a dict with one strength per variable, missing ones
+defaulting to 1; `uns["bae"]["design_lambda"]` is now always that dict, and
+`design_blocks` and `latent_design_r2_per_block` report the assignment and each
+block's R² on its own variable. A block keeps the part of the target its
+variable explains *beyond* the other variables, `P_J − P_{J∖v}`, so what two
+confounded variables share is filtered out of both blocks. This changes what a
+multi-variable `design_key` did before this entry's release (one joint
+projection, the orthogonalization deciding which dimension carried what), and
+the intercept is now removed from the kept part too, which is zero on centred
+data. On the planted data with a second orthogonal variable, TODO_BLOCKS_CL
+`design_dims` stays valid for a single variable only.
+
+`plot_selection_trace` and `plot_selection_paths` gain `decided_by`, the part
+whose counterfactual the markers flag against, defaulting to `no_design` when a
+design term is on and to `within` otherwise; every part has a fixed colour.
+
 `allboost` gains `selection_from` (path replay: a target that follows another's
 selection path, recording its own would-be pick as the counterfactual),
 `return_history="steps"` (selection and increments without the
 `(n_targets, stepno, n_features)` coefficient path) and `AllboostHistory.update`.
 `disentangle_boosting_targets` accepts `components`. Checkpoint format 7 carries
-the design state; format-6 files still load. Measured fit-time cost of the
+the design state, the blocks and the decomposition; format-6 files still load. Measured fit-time cost of the
 replay at 2,000 cells and 2,000–5,000 genes: within run-to-run noise.
 
 Not combinable in this release with a transfer model, a warm start or
