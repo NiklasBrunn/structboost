@@ -1922,9 +1922,10 @@ def plot_selection_paths(
         placed = finals[rank].astype(float)
         for j in range(1, placed.size):
             placed[j] = max(placed[j], placed[j - 1] + gap)
-        placed -= max(0.0, placed[-1] - hi) if placed.size else 0.0
-        for j, i in zip(rank, order[rank], strict=True):
-            final, y = paths[i, -1], placed[j]
+        if placed.size:
+            ax.set_ylim(min(lo, placed[0] - gap / 2), max(hi, placed[-1] + gap / 2))
+        for pos, j in enumerate(rank):
+            i, final, y = order[j], finals[j], placed[pos]
             if abs(y - final) > 1e-12:
                 ax.plot([stepno, stepno + 0.5], [final, y], color=_FAINT, lw=0.6, zorder=1)
             ax.annotate(
