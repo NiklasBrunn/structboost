@@ -112,6 +112,7 @@ Each of these has a guide page.
 | --- | --- |
 | [Batch integration](https://niklasbrunn.github.io/structboost/guide/tasks/batch-integration.html) | `batch_key` names the covariate and `batch_integration_mode` chooses whether it conditions the decoder, protects gene selection, or both. `transform` stays gene-only and needs no batch labels. |
 | [Mandatory features](https://niklasbrunn.github.io/structboost/guide/tasks/gene-selection.html) | `mandatory_genes` puts known markers in boosting's unpenalized adjustment block, so they are never subject to competitive selection. Flat or per latent dimension. It forces them into the *specification*, not into the fitted support. |
+| [Design-guided selection](https://niklasbrunn.github.io/structboost/guide/tasks/design-guided.html) | `design_key` names an experimental design variable (condition, timepoint) and a loss on the latent code pulls chosen dimensions toward it, so subtle design effects get their own sparse gene list instead of losing to the major variance axes. Every encoder weight is split exactly into its reconstruction and design parts, and a per-step selection trace records which picks the design term decided. |
 | [Reading a fit](https://niklasbrunn.github.io/structboost/guide/tasks/reading-dimensions.html) | `plot_latent_dimensions` draws one row per latent dimension — the sorted score curve, the per-gene contributions, and the scores split by any grouping — plus a UMAP grid and a dimension-correlation heatmap. Genes are ranked by their exact share of a dimension's variance, not by coefficient size. |
 | [Persistence](https://niklasbrunn.github.io/structboost/guide/tasks/persistence.html) | `save` and `load` a fitted model as one checkpoint, readable with `weights_only=True`. |
 | [Interpretation](https://niklasbrunn.github.io/structboost/guide/tasks/interpreting.html) | Ranked gene lists per dimension, stored functional annotations, and a self-contained interactive HTML explorer. |
@@ -119,7 +120,7 @@ Each of these has a guide page.
 
 ## Exploratory features
 
-The whole package is pre-1.0, but these four are **under active development** and
+The whole package is pre-1.0, but these five are **under active development** and
 less settled than the rest. They work, and each is documented with what is known
 about it — but their behaviour, defaults and APIs are more likely to change, and
 results from them warrant more scepticism than the core fit does.
@@ -129,6 +130,7 @@ results from them warrant more scepticism than the core fit does.
 | **Stability selection** (`BAE.stability_selection`) | Provides **no formal error control** — `expected_false_positives` is deliberately `NaN`, because training iterations are neither independent nor exchangeable. Per-dimension frequencies are only meaningful when dimensions keep their identity, which `dim_match_quality` reports and does not guarantee. |
 | **Disentanglement** (`disentanglement=`) | On by default since 0.5.0, and both methods are provisional. Decorrelation is an extra constraint that real gene programs do not satisfy, so it costs biological structure — measured at marker-recovery F1 0.98 to 0.88 on simulated data. `disentanglement_alpha` softens it; `"none"` turns it off. |
 | **Starting from an existing representation** (`init_pca`, `init_obsm`) | The warm start is applied once, on the first iteration, and silently overrides `latent_dim` if the supplied representation is a different width. It also depends on the decoder having enough steps in that first iteration to follow it — on few cells at the default `batch_size` the effect reverses. |
+| **Design-guided selection** (`design_key`, `design_lambda`) | New in 0.7.0 and measured on simulated data only. The loss is a *filter*: it removes within-group variation from the boosting target, so on subtle effects it switches on only close to `design_lambda=1`, and the exact weight split credits the protected between-group signal to reconstruction rather than to the design term — the design term's decisions are read from the counterfactual column of the selection trace, not from the sign of its part. |
 | **Starting from a prior encoder matrix** (`BAE.from_reference`) | Transfer works, but the two latent blocks land on **incomparable scales** — measured at a 232× gap in per-dimension standard deviation — so anything Euclidean must be handed `obsm["X_bae_scaled"]` rather than `X_bae`. `novel_variance_share` is not evidence of novel biology on the fitting data. |
 
 ## Citation

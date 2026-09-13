@@ -210,6 +210,7 @@ tasks/fitting
 tasks/gene-selection
 tasks/reading-dimensions
 tasks/batch-integration
+tasks/design-guided
 tasks/transfer
 tasks/interpreting
 tasks/persistence

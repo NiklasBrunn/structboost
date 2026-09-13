@@ -3,6 +3,109 @@
 Releases follow [semantic versioning](https://semver.org). While the project is
 pre-1.0, a minor bump may break API.
 
+### [0.7.0] - 2026-09-13
+
+**Not breaking.** A fit without the new argument is bitwise the 0.6.0 fit; this
+adds an exploratory way to give an experimental design variable its own latent
+dimensions, and an exact readout of how each gene got its weight.
+
+**New `BAE.fit(design_key=..., design_dims=...)` and `BAEConfig.design_lambda`:
+design-guided gene selection.** Reconstruction loss favours the major variance
+axes, so a condition effect on ten genes rarely earns a dimension of its own.
+`design_key` names an obs column (or several) and adds, on the dimensions in
+`design_dims`, the loss `½ Σ_k ||(I − P) z_k||²` — the latent variance the
+encoded design does *not* explain, `P` projecting onto its columns plus an
+intercept. Summed over cells like the reconstruction target, its gradient
+`(I − P) z_k` removes a fraction `target_optim_lr · design_lambda` of the
+within-group residual from the boosting target and leaves the group-mean pattern
+untouched. The step is applied after the reconstruction step and the Löwdin
+orthogonalization, so the constraint is exact on the constrained dimensions and
+the orthogonality between constrained and free dimensions is the approximate
+one. `design_dims` defaults to the first `min(q, latent_dim)` dimensions, `q`
+the number of encoded design columns, because the design subspace has that
+rank. The covariate never enters the encoder, so `transform` stays gene-only,
+and the term also applies inside `stability_selection`, whose loop now shares
+the boosting step with `fit` rather than mirroring it.
+
+The loss was chosen over a loss weight with free scale and over a projection
+dial for one reason: it is quadratic with unit curvature, so `design_lambda` has
+a natural range, `[0, 1/target_optim_lr]`. At `1` the target of a constrained
+dimension is exactly its design-explained part; beyond `1` the within-group
+residual comes back sign-flipped and, the selection criterion being squared,
+competitors regain their scores — `fit` raises there. Because it only filters,
+the latent scale cannot blow up, which a between-group *amplification* would
+risk. A ratio loss such as `−R²` was rejected because its gradient scales with
+the inverse latent scale, which boosting shrinkage sets small, so its weight
+would have meant something different at every training stage — the failure
+recorded for `disentanglement_lambda` in 0.5.0.
+
+**Expect the dial to switch on close to 1 when the effect is subtle.** Selection
+compares squared scores, so halving the residual only quarters a competitor's
+score. On planted data (1,000 cells, 500 genes, three cell types, ten non-marker
+genes shifted by one standard deviation between two conditions, three seeds,
+`latent_dim=6`, `design_dims=[0]`, 150 iterations) `design_lambda` 0, 0.25 and
+0.5 all left the constrained dimension at design R² 0.001 with none of the ten
+genes selected, while `1` gave R² 0.72 with precision and recall 1.0, and raised
+marker-recovery F1 on the *free* dimensions from 0.63 to 0.84 because the
+condition signal no longer competed for them. Shuffled labels at `1` gave R² 0.12
+over 29 genes: the null to fit alongside, since the term will find some genes
+correlated with any labelling. Batch confounded with the design is selected as
+design unless `batch_key` is also given.
+
+**Every encoder weight is split exactly into the parts of the target that
+produced it.** Componentwise boosting is linear in its target once the selection
+path is fixed — the update is `ν · xⱼᵀr / ||xⱼ||²`, the residual is linear in the
+target, and the mandatory pre-step is a linear solve — so replaying the selected
+path on each additive part of the target gives coefficients that sum to the
+joint ones. Verified against `allboost` to 1e-15 relative in float64 and 2.5e-7
+in the float32 the fit runs at, mandatory pre-step and ridge included. With a
+`design_key`, `varm["BAE_encoder_weights_carry"]` (the code carried over from the
+previous iteration), `..._recon` (the reconstruction gradient step) and
+`..._design` (what the design step removed) sum to `varm["BAE_encoder_weights"]`
+to its float32 rounding; under correlation disentanglement a `..._correlation`
+part joins them. `uns["bae"]["selection_trace"]` records, for the restored
+iteration and every boosting step, the selected gene, its increment split the
+same way, the norms of the target parts, and two counterfactual picks: the gene
+the target *without* the design step would have selected given the genes already
+entered, and the gene the reconstruction step alone would have. The parts stay
+additive through the Löwdin step because that step is a right-multiplication
+computed from the total target (`T (TᵀT)^{-1/2} diag||T|| = U Vᵀ diag||T||`).
+
+**The split is of one iteration's target, deliberately.** An accumulation over
+the fit — shadow matrices carried through the recursion — is exact too and was
+implemented first, then dropped: wherever reconstruction keeps re-injecting what
+the design term keeps removing, the accumulated parts grow while cancelling,
+measured at 400 times the weight at `design_lambda=0.5` on the planted data.
+
+**Read the split with the mechanism in mind.** On the genes that win, the design
+part is a small shrinkage of the opposite sign and the reconstruction part
+exceeds the total, because a filter's additive contribution is minus what it
+removed while the between-group signal it protected sits in the reconstruction
+gradient. Whether the design term *decided* a selection is the counterfactual
+column, not the sign of the design part; a decomposition of the winner cannot
+show the losers. On the planted data at `design_lambda=1`, 79% of the
+constrained dimension's steps were decided by the design step and its part
+opposed the weight's sign on every selected condition gene. The target-part
+norms carry a null signature: 0.76 of the total on real signal, 15 times the
+total on shuffled labels, where the filter removed nearly everything.
+
+**New `"attribution"` panel in `plot_latent_dimensions` and new
+`plot_selection_trace`.** The panel draws each top gene's weight by part, side
+by side rather than stacked since the parts can have opposite signs; the trace
+plot unrolls a dimension's boosting steps in time, with a hollow marker where
+the design step decided the pick.
+
+`allboost` gains `selection_from` (path replay: a target that follows another's
+selection path, recording its own would-be pick as the counterfactual),
+`return_history="steps"` (selection and increments without the
+`(n_targets, stepno, n_features)` coefficient path) and `AllboostHistory.update`.
+`disentangle_boosting_targets` accepts `components`. Checkpoint format 7 carries
+the design state; format-6 files still load. Measured fit-time cost of the
+replay at 2,000 cells and 2,000–5,000 genes: within run-to-run noise.
+
+Not combinable in this release with a transfer model, a warm start or
+`boosting_independent=False`, each of which raises with the reason.
+
 ### [0.6.0] - 2026-09-09
 
 **Not breaking.** Nothing existing changes behaviour; this adds a way to read a
