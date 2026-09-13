@@ -461,16 +461,14 @@ class BAE(nn.Module):
         self._batch_integration_mode: str = "none"
         self._batch_weights: np.ndarray | None = None
         self._mandatory_genes = None
-        #: Design guidance (`fit(design_key=...)`): the covariate encoding whose
-        #: column space the constrained latent dimensions are pulled toward, the
-        #: dimensions it acts on, the exact recon/design split of the encoder
-        #: weights and the per-step selection trace of the restored iteration.
-        self._design_encoding = None
-        self._design_dims: np.ndarray | None = None
-        self._design_within: list[str] | None = None
-        self._design_columns: list[str] | None = None
+        #: Design guidance (`fit(design_key=...)`): per design variable, in order,
+        #: its latent dimensions and its strength, plus the strata; the
+        #: decomposition's variables and strata; and, for the restored iteration,
+        #: the exact split of the encoder weights and the per-step selection trace.
+        #: The subspace bases are rebuilt from the data wherever they are needed.
         self._design_blocks: dict[str, np.ndarray] | None = None
         self._design_lambdas: dict[str, float] | None = None
+        self._design_within: list[str] | None = None
         self._decompose_columns: list[str] | None = None
         self._decompose_within: list[str] | None = None
         self._encoder_components: dict[str, np.ndarray] | None = None
@@ -941,22 +939,6 @@ class BAE(nn.Module):
         subsets = [tuple(columns), *(tuple(c for c in columns if c != v) for v in columns), ()]
         return {frozenset(subset): basis(subset) for subset in dict.fromkeys(subsets)}
 
-    def _design_filter(self, adata: AnnData) -> tuple[dict[frozenset, np.ndarray], dict]:
-        """The design filter of a fitted or fitting model: bases plus per-block dims and factor."""
-        subspaces = self._design_subspaces(adata, self._design_columns, self._design_within)
-        lr = self.config.target_optim_lr
-        blocks = {
-            v: (self._design_blocks[v], lr * self._design_lambdas[v]) for v in self._design_columns
-        }
-        return subspaces, blocks
-
-    def _decompose_spec(
-        self, adata: AnnData
-    ) -> tuple[dict[frozenset, np.ndarray], list[str], bool]:
-        """The reconstruction-gradient decomposition of a fitting model: bases, variables, strata."""
-        columns, within = self._decompose_columns, self._decompose_within
-        return self._design_subspaces(adata, columns, within), list(columns), within is not None
-
     @staticmethod
     def _design_keep(Q_keep: np.ndarray, Q_drop: np.ndarray | None, T: np.ndarray) -> np.ndarray:
         """The design-explained part of the columns of ``T`` : ``P_keep T - P_drop T``."""
@@ -1178,7 +1160,7 @@ class BAE(nn.Module):
         stats: dict[str, float] | None = None,
         z_override: torch.Tensor | None = None,
         components: bool = False,
-        decompose: tuple[dict[frozenset, np.ndarray], list[str], bool] | None = None,
+        decompose: dict[frozenset, np.ndarray] | None = None,
     ) -> np.ndarray | tuple[np.ndarray, dict[str, np.ndarray], dict[str, np.ndarray] | None]:
         """Compute boosting targets via single gradient step from current z.
 
@@ -1235,7 +1217,7 @@ class BAE(nn.Module):
             disentanglement, ``"correlation"``. ``targets == sum(parts)`` up to
             float32 rounding. Used by the weight attribution.
         decompose
-            ``(subspaces, variables, stratified)`` from :meth:`_decompose_spec`.
+            Bases from :meth:`_design_subspaces` for ``_decompose_columns``.
             Splits the reconstruction step by design variables instead of
             returning it whole. With ``R = D(z) - X`` and the target-loss
             convention ``L = ||R||²_F / n_genes``, the residual sum of squares a
@@ -1310,11 +1292,11 @@ class BAE(nn.Module):
             if decompose is None:
                 grads["recon"] = recon_grad
             else:
-                subspaces, columns, stratified = decompose
+                columns, stratified = self._decompose_columns, self._decompose_within is not None
                 R = x_recon - X
                 bases = {
                     key: torch.as_tensor(Q, dtype=X.dtype, device=X.device)
-                    for key, Q in subspaces.items()
+                    for key, Q in decompose.items()
                 }
 
                 def explained(key: frozenset) -> torch.Tensor:
@@ -1363,10 +1345,9 @@ class BAE(nn.Module):
         boost: dict,
         *,
         z_override: torch.Tensor | None = None,
-        attribute: bool = False,
         path: bool = False,
-        design: tuple[dict[frozenset, np.ndarray], dict] | None = None,
-        decompose: tuple[dict[frozenset, np.ndarray], list[str], bool] | None = None,
+        design: dict[frozenset, np.ndarray] | None = None,
+        decompose: dict[frozenset, np.ndarray] | None = None,
         stats: dict[str, float] | None = None,
     ) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray] | None, dict | None]:
         """The boosting half of one training iteration: steps 1-4 of :meth:`fit`.
@@ -1383,16 +1364,19 @@ class BAE(nn.Module):
             Fixed per-fit boosting inputs from :meth:`_boost_inputs`. Its
             ``"covcache"`` entry is filled in place on the first call when the
             cache is lazy.
-        attribute
-            Split the fitted encoder into the additive parts of its target. The
-            target is ``carry + recon (+ correlation) + design``: the current code
-            ``z``, the reconstruction gradient step, the correlation-penalty step
-            where that mode is on, and what the design filter removed. Boosting
-            is linear in the target once the selection path is fixed, so each
-            part is fitted along the path of the total
+        design, decompose
+            Subspace bases from :meth:`_design_subspaces` for the design filter
+            (``_design_blocks``) and for the decomposition of the reconstruction
+            step (``_decompose_columns``, forwarded to
+            :meth:`_compute_boosting_targets`). Either one also makes the fitted
+            encoder split into the additive parts of its target: ``carry`` (the
+            current code ``z``), ``recon`` or its decomposition, ``correlation``
+            where that mode is on, and ``design``, what the filter removed.
+            Boosting is linear in the target once the selection path is fixed,
+            so each part is fitted along the path of the total
             (``allboost(selection_from=...)``) and the parts sum to the encoder
-            exactly. The design part is taken as the remainder, so the identity
-            holds to the last bit rather than to float32 rounding.
+            exactly; the part not replayed is taken as the remainder, so the
+            identity holds to the last bit rather than to float32 rounding.
 
             Deliberately the split of *this iteration's* target, not an
             accumulation over the fit. An accumulated split (shadow matrices
@@ -1400,22 +1384,15 @@ class BAE(nn.Module):
             wherever reconstruction keeps re-injecting what the design term keeps
             removing, the two shadows grow while cancelling -- measured at 400x
             the weight on planted data at ``design_lambda=0.5``.
+            The filter of block ``v`` keeps ``P_J T - P_{J\\v} T``, what ``v``
+            explains beyond the other design variables, so a confounded part is
+            filtered from every block, and removes the fraction
+            ``target_optim_lr * design_lambda[v]`` of the rest. Applied after
+            orthogonalization, so the constraint is exact and the orthogonality
+            between constrained and free dimensions is the approximate one.
         path
             Record the selected gene and its increment per step even without
             attribution (``track_selection_path``). Free: the history is passive.
-        design
-            ``(subspaces, blocks)`` from :meth:`_design_filter`: the subspace
-            bases and, per design variable, its latent dimensions and
-            ``target_optim_lr * design_lambda``. Block ``v`` keeps
-            ``P_J T - P_{J\\v} T``, what ``v`` explains beyond the other design
-            variables; a confounded part is filtered from every block. Applied
-            after orthogonalization, so the constraint is exact and the
-            orthogonality between constrained and free dimensions is the
-            approximate one.
-        decompose
-            Forwarded to :meth:`_compute_boosting_targets`: split the
-            reconstruction step by design variables. A diagnostic; the fit is
-            unchanged.
 
         Returns
         -------
@@ -1436,6 +1413,7 @@ class BAE(nn.Module):
             plus ``target_norm`` per part. With only ``path``, just ``gene`` and
             ``delta["total"]``. None otherwise.
         """
+        attribute = design is not None or decompose is not None
         out = self._compute_boosting_targets(
             X,
             lr=self.config.target_optim_lr,
@@ -1468,11 +1446,11 @@ class BAE(nn.Module):
                 targets = disentangle_boosting_targets(targets, alpha=alpha)
 
         if design is not None:
-            subspaces, blocks = design
-            joint = frozenset(blocks)
-            for variable, (dims, factor) in blocks.items():
+            joint = frozenset(self._design_blocks)
+            for variable, dims in self._design_blocks.items():
                 block = targets[:, dims].astype(np.float64)
-                kept = self._design_keep(subspaces[joint], subspaces[joint - {variable}], block)
+                kept = self._design_keep(design[joint], design[joint - {variable}], block)
+                factor = self.config.target_optim_lr * self._design_lambdas[variable]
                 targets[:, dims] = (block - factor * (block - kept)).astype(targets.dtype)
             if attribute:
                 # The design part is replayed too, for its scores and counterfactual;
@@ -1940,7 +1918,6 @@ class BAE(nn.Module):
         batch_key: str | list[str] | None = None,
         batch_integration_mode: Literal["encoder", "decoder", "both"] = _MODE_UNSET,  # type: ignore[assignment]
         design_key: str | list[str] | dict[str, list[int]] | None = None,
-        design_dims: list[int] | np.ndarray | None = None,
         design_within: str | list[str] | None = None,
         decompose_key: str | list[str] | None = None,
         decompose_within: str | list[str] | None = None,
@@ -2024,21 +2001,25 @@ class BAE(nn.Module):
         design_key
             **Exploratory**, under active development. Obs column, or several,
             holding an experimental design variable (condition, timepoint, ...)
-            that the latent dimensions in ``design_dims`` should separate. Adds
-            the loss ``½ Σ_k ||(I - P) z_k||²`` on those dimensions — the latent
+            that a block of latent dimensions should separate. Adds the loss
+            ``½ Σ_k ||(I - P) z_k||²`` on those dimensions — the latent
             variance the design does *not* explain, ``P`` projecting onto the
             encoded design columns — weighted by ``BAEConfig.design_lambda``; see
             there for how the step is taken and what it costs.
 
-            Several variables get one block of dimensions each: a list assigns
-            consecutive blocks in order, as wide as each variable's encoded
-            columns; a dict ``{variable: [dims, ...]}`` assigns them explicitly.
-            A block keeps the part of the target its variable explains *beyond*
-            the other variables (``P_J - P_{J \\ v}``), so what two confounded
-            variables share is filtered out of both blocks. ``design_lambda`` may
-            be a dict with one strength per variable, missing ones defaulting to
-            1. ``uns["bae"]["design_blocks"]`` and ``latent_design_r2_per_block``
-            report the assignment and each block's R² on its own variable.
+            Every variable gets one block of dimensions. A name or a list assigns
+            consecutive blocks in order, each as wide as the variable's encoded
+            columns (levels minus one per categorical column, one per numeric
+            column), since the subspace a variable spans has that rank; a dict
+            ``{variable: [dims, ...]}`` assigns them explicitly. The other
+            dimensions stay reconstruction-only. A block keeps the part of the
+            target its variable explains *beyond* the other variables
+            (``P_J - P_{J \\ v}``), so what two confounded variables share is
+            filtered out of both blocks. ``design_lambda`` may be a dict with one
+            strength per variable, missing ones defaulting to 1.
+            ``uns["bae"]["design_blocks"]`` reports the assignment and
+            ``latent_design_r2_per_dim`` each dimension's R² on its block's
+            variable (on the joint design for the free dimensions).
 
             Turning this on also makes the fit **split every encoder weight
             exactly** into the parts of the target that produced it in the
@@ -2069,13 +2050,6 @@ class BAE(nn.Module):
             Not combinable with a transfer model, a warm start or
             ``boosting_independent=False`` in this release. The covariate is
             never an encoder input, so :meth:`transform` stays gene-only.
-        design_dims
-            Latent dimensions the design loss acts on. Defaults to the first
-            ``min(q, latent_dim)`` dimensions, ``q`` being the number of encoded
-            design columns (levels minus one per categorical column, one per
-            numeric column): the design subspace has dimension ``q``, so more
-            constrained dimensions than that cannot all be design-explained and
-            mutually orthogonal. The remaining dimensions stay reconstruction-only.
         design_within
             Obs column(s) defining strata, typically the cell type. With it the
             kept part of the target is the design effect *within* each stratum:
@@ -2236,10 +2210,6 @@ class BAE(nn.Module):
         if decoder_warmup_epochs < 0:
             raise ValueError(f"decoder_warmup_epochs must be >= 0, got {decoder_warmup_epochs}")
 
-        if design_key is None and design_dims is not None:
-            raise ValueError(
-                "design_dims was given without a design_key; there is nothing to separate"
-            )
         if design_key is None and design_within is not None:
             raise ValueError(
                 "design_within was given without a design_key; there is nothing to stratify"
@@ -2427,16 +2397,9 @@ class BAE(nn.Module):
         )
 
         # --- Design guidance and the reconstruction-gradient decomposition ---
-        self._design_encoding = None
-        self._design_dims = None
-        self._design_within = None
-        self._design_columns = None
-        self._design_blocks = None
-        self._design_lambdas = None
-        self._decompose_columns = None
-        self._decompose_within = None
-        design = None
-        decompose = None
+        self._design_blocks = self._design_lambdas = self._design_within = None
+        self._decompose_columns = self._decompose_within = None
+        design = decompose = None
 
         def resolve_columns(spec, name: str) -> list[str]:
             columns = [spec] if isinstance(spec, str) else list(spec)
@@ -2460,53 +2423,38 @@ class BAE(nn.Module):
         if design_key is not None:
             from ._utils import encode_obs_covariates
 
+            latent_dim = self.config.latent_dim
             if isinstance(design_key, dict):
-                if design_dims is not None:
-                    raise ValueError(
-                        "design_dims cannot be combined with the dict form of design_key, "
-                        "which already assigns the dimensions per variable"
-                    )
                 columns = resolve_columns(list(design_key), "design_key")
-                blocks = {v: np.asarray(d, dtype=np.intp).ravel() for v, d in design_key.items()}
+                blocks = {v: np.asarray(design_key[v], dtype=np.intp).ravel() for v in columns}
             else:
                 columns = resolve_columns(design_key, "design_key")
-                if design_dims is not None:
-                    if len(columns) > 1:
-                        raise ValueError(
-                            "design_dims applies to a single design variable; use the dict "
-                            "form of design_key to assign dimensions per variable"
-                        )
-                    blocks = {columns[0]: np.asarray(design_dims, dtype=np.intp).ravel()}
-                else:
-                    # One block per variable, in order, as wide as the variable's
-                    # encoded columns: the subspace a variable spans has that rank.
-                    widths = [encode_obs_covariates(adata, [v]).n_columns for v in columns]
-                    edges = np.cumsum([0, *widths])
-                    blocks = {
-                        v: np.arange(edges[i], min(edges[i + 1], self.config.latent_dim))
-                        for i, v in enumerate(columns)
-                    }
-            all_dims = np.concatenate(list(blocks.values()))
+                edges = np.cumsum(
+                    [0, *(encode_obs_covariates(adata, [v]).n_columns for v in columns)]
+                )
+                blocks = {
+                    v: np.arange(edges[i], min(edges[i + 1], latent_dim))
+                    for i, v in enumerate(columns)
+                }
+            dims = np.concatenate(list(blocks.values()))
             if (
                 any(d.size == 0 for d in blocks.values())
-                or np.unique(all_dims).size != all_dims.size
-                or ((all_dims < 0) | (all_dims >= self.config.latent_dim)).any()
+                or np.unique(dims).size != dims.size
+                or ((dims < 0) | (dims >= latent_dim)).any()
             ):
                 raise ValueError(
-                    "design_key blocks (design_dims) must be non-empty, disjoint sets of dimensions in "
-                    f"[0, {self.config.latent_dim}), got "
-                    f"{ {v: d.tolist() for v, d in blocks.items()} }"
+                    "design_key blocks must be non-empty, disjoint sets of dimensions in "
+                    f"[0, {latent_dim}), got { {v: d.tolist() for v, d in blocks.items()} }"
                 )
             spec = self.config.design_lambda
-            if isinstance(spec, dict):
-                unknown = set(spec) - set(columns)
-                if unknown:
-                    raise ValueError(
-                        f"design_lambda names variables that are not in design_key: {sorted(unknown)}"
-                    )
-                lambdas = {v: float(spec.get(v, 1.0)) for v in columns}
-            else:
-                lambdas = {v: float(spec) for v in columns}
+            if isinstance(spec, dict) and set(spec) - set(columns):
+                raise ValueError(
+                    "design_lambda names variables that are not in design_key: "
+                    f"{sorted(set(spec) - set(columns))}"
+                )
+            lambdas = {
+                v: float(spec.get(v, 1.0) if isinstance(spec, dict) else spec) for v in columns
+            }
             lr = self.config.target_optim_lr
             for v, lam in lambdas.items():
                 if lr * lam > 1.0:
@@ -2517,20 +2465,18 @@ class BAE(nn.Module):
                         "criterion is squared its competitors regain their scores. Use a "
                         "value in [0, 1/target_optim_lr]; 1 removes the residual completely."
                     )
-            self._design_encoding = encode_obs_covariates(adata, columns)
-            self._design_columns = columns
-            self._design_blocks = blocks
-            self._design_lambdas = lambdas
-            self._design_dims = all_dims
+            self._design_blocks, self._design_lambdas = blocks, lambdas
             self._design_within = resolve_within(design_within, columns, "design_within")
-            design = self._design_filter(adata)
+            design = self._design_subspaces(adata, columns, self._design_within)
 
         if decompose_key is not None:
             self._decompose_columns = resolve_columns(decompose_key, "decompose_key")
             self._decompose_within = resolve_within(
                 decompose_within, self._decompose_columns, "decompose_within"
             )
-            decompose = self._decompose_spec(adata)
+            decompose = self._design_subspaces(
+                adata, self._decompose_columns, self._decompose_within
+            )
 
         # Optimizer for decoder only
         decoder_optimizer = torch.optim.AdamW(
@@ -2621,7 +2567,6 @@ class BAE(nn.Module):
                 D_condition,
                 boost,
                 z_override=z_init if iteration == 0 else None,
-                attribute=design is not None or decompose is not None,
                 path=track_selection_path,
                 design=design,
                 decompose=decompose,
@@ -2949,7 +2894,11 @@ class BAE(nn.Module):
             ),
             prior_dims=prior_dims,
         )
-        design = self._design_filter(adata) if self._design_columns is not None else None
+        design = (
+            self._design_subspaces(adata, list(self._design_blocks), self._design_within)
+            if self._design_blocks is not None
+            else None
+        )
 
         # Snapshot so the fitted model is unchanged when this returns.
         saved_encoder = self.encoder.linear.weight.detach().clone()
@@ -3825,29 +3774,24 @@ class BAE(nn.Module):
             uns_dict["latent_obs_r2_per_dim"] = latent_r2_per_dim(
                 transform_obs_covariates(adata, self._batch_encoding), latent
             )
-        if self._design_columns is not None:
+        if self._design_blocks is not None:
             # Same statistic as the batch R² above, opposite goal: near one on the
-            # constrained dimensions means the design term did its job. Per dim
-            # against the joint design; per block against the block's own kept
-            # subspace (what its variable explains beyond the others).
-            subspaces, blocks = self._design_filter(adata)
-            joint, empty = frozenset(self._design_columns), frozenset()
-            uns_dict["design_key"] = list(self._design_columns)
-            uns_dict["design_columns"] = self._design_encoding.encoded_columns
-            uns_dict["design_blocks"] = {
-                v: np.asarray(d, dtype=np.intp) for v, d in self._design_blocks.items()
-            }
-            uns_dict["design_dims"] = np.asarray(self._design_dims, dtype=np.intp)
+            # constrained dimensions means the design term did its job. A block's
+            # dimensions are scored against what its variable explains beyond the
+            # others (the part the filter kept), the free ones against the joint design.
+            blocks = self._design_blocks
+            Q = self._design_subspaces(adata, list(blocks), self._design_within)
+            joint = frozenset(blocks)
+            r2 = self._design_r2(Q[joint], Q[frozenset()], latent)
+            for v, dims in blocks.items():
+                r2[dims] = self._design_r2(Q[joint], Q[joint - {v}], latent[:, dims])
+            uns_dict["design_key"] = list(blocks)
+            uns_dict["design_blocks"] = {v: d.copy() for v, d in blocks.items()}
+            uns_dict["design_dims"] = np.concatenate(list(blocks.values()))
             uns_dict["design_lambda"] = dict(self._design_lambdas)
             if self._design_within is not None:
                 uns_dict["design_within"] = list(self._design_within)
-            uns_dict["latent_design_r2_per_dim"] = self._design_r2(
-                subspaces[joint], subspaces[empty], latent
-            )
-            uns_dict["latent_design_r2_per_block"] = {
-                v: self._design_r2(subspaces[joint], subspaces[joint - {v}], latent[:, dims])
-                for v, (dims, _) in blocks.items()
-            }
+            uns_dict["latent_design_r2_per_dim"] = r2
         if self._decompose_columns is not None:
             uns_dict["decompose_key"] = list(self._decompose_columns)
             if self._decompose_within is not None:
@@ -3864,11 +3808,11 @@ class BAE(nn.Module):
             trace = copy.deepcopy(self._selection_trace)
             shares = trace.pop("residual_share", None)
             if shares is not None:
-                names = list(shares)
-                adata.varm["BAE_residual_variance_share"] = np.column_stack(
-                    [shares[n] for n in names]
+                import pandas as pd
+
+                adata.varm["BAE_residual_variance_share"] = pd.DataFrame(
+                    shares, index=adata.var_names
                 )
-                uns_dict["residual_variance_share_parts"] = names
             uns_dict["selection_trace"] = trace
 
         # Always recorded. A bare MSE is not interpretable on its own: on the

@@ -186,7 +186,7 @@ class BAEConfig:
         ``design_key``; ignored otherwise. The loss is the latent variance the
         design does not explain, on the constrained dimensions only::
 
-            L_design = ½ Σ_{k ∈ design_dims} ||(I - P) z_k||²
+            L_design = ½ Σ_{k ∈ block} ||(I - P) z_k||²
 
         summed over cells like the reconstruction target, with ``P`` the
         projection onto the encoded design columns (plus an intercept). Its

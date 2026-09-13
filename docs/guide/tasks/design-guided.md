@@ -9,7 +9,7 @@ is not yet known. Expect defaults and names to move.
 
 ```python
 model.fit(adata, design_key="condition")                  # dims default: first min(q, latent_dim)
-model.fit(adata, design_key="timepoint", design_dims=[0, 1, 2])
+model.fit(adata, design_key={"timepoint": [0, 1, 2]})
 model.fit(adata, design_key=["timepoint", "condition"], batch_key="batch")
 ```
 
@@ -17,7 +17,7 @@ Reconstruction loss favours the major variance axes. A condition effect that
 touches ten genes by one standard deviation is real, and it is also a rounding
 error next to cell type, so a plain fit rarely gives it a dimension of its own.
 `design_key` names an obs column, or several, and pulls the latent dimensions in
-`design_dims` toward it. The other dimensions stay reconstruction-only.
+its block toward it. The other dimensions stay reconstruction-only.
 
 ## What the loss is
 
@@ -56,7 +56,7 @@ Selection compares squared scores. Halving the within-group residual only quarte
 a competitor's score, and a subtle between-group signal still loses. Measured on
 planted data (1,000 cells, 500 genes, three cell types, ten non-marker genes
 shifted by one standard deviation between two conditions, three seeds, `latent_dim=6`,
-`design_dims=[0]`, 150 iterations):
+`design_key={"cond": [0]}`, 150 iterations):
 
 | `design_lambda` | design R² of dim 0 | condition genes in dim 0 (precision / recall) | marker F1 on the free dims |
 | --- | --- | --- | --- |
@@ -145,13 +145,13 @@ pan-lymphoid interferon component, so the pooled separation is lower (0.86
 against 0.90) while the within-monocyte readout is sharper. Which is wanted
 depends on the question.
 
-`design_dims` defaults to the first `min(q, latent_dim)` dimensions, `q` being the
+A variable's block defaults to the next `min(q, latent_dim)` dimensions, `q` being the
 number of encoded design columns (levels minus one per categorical column). The
 design subspace has dimension `q`, so more constrained dimensions than that
 cannot all be design-explained and mutually orthogonal. Check the result with
 
 ```python
-adata.uns["bae"]["latent_design_r2_per_dim"]   # near one on design_dims is the goal
+adata.uns["bae"]["latent_design_r2_per_dim"]   # near one on the constrained dimensions is the goal
 adata.uns["bae"]["latent_obs_r2_per_dim"]      # the batch counterpart, near zero
 ```
 
@@ -266,7 +266,7 @@ BAEConfig(design_lambda={"condition": 1.0, "disease": 0.5})    # a float still a
 
 adata.uns["bae"]["design_blocks"]                # {variable: dims}
 adata.uns["bae"]["design_lambda"]                # {variable: strength}
-adata.uns["bae"]["latent_design_r2_per_block"]   # each block's dims scored against its own variable
+adata.uns["bae"]["latent_design_r2_per_dim"]     # a block's dims scored against its own variable
 ```
 
 A block keeps the part of the target its variable explains *beyond* the other
@@ -278,8 +278,7 @@ tell apart from another variable's. On the Wilk cohort, where every COVID-19
 donor is male and two of the six healthy donors are female, sex and disease
 share most of their between-group variance, and `design_key={"disease": [0],
 "sex": [1]}` gives each block only the part the other cannot explain
-(TODO_BLOCKS). `design_dims` remains valid for a single variable; with several,
-use the dict.
+(TODO_BLOCKS).
 
 ## Where does a gene's score come from? The decomposition
 
@@ -296,8 +295,7 @@ model.fit(adata, decompose_key="disease")
 model.fit(adata, decompose_key=["disease", "sex"], decompose_within="cell_type")
 
 adata.varm["BAE_encoder_weights_between_disease"]   # + "_between_sex", "_shared", "_strata" (or "_mean"), "_within", "_carry"
-adata.varm["BAE_residual_variance_share"]           # (n_genes, n_parts): each gene's residual sum of squares, split the same way
-adata.uns["bae"]["residual_variance_share_parts"]   # the column names
+adata.varm["BAE_residual_variance_share"]           # DataFrame, one column per part: each gene's residual sum of squares, split the same way
 adata.uns["bae"]["selection_trace"]                 # the same fields as above, keyed by these parts
 ```
 

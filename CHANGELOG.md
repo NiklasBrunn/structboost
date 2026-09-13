@@ -9,11 +9,11 @@ pre-1.0, a minor bump may break API.
 adds an exploratory way to give an experimental design variable its own latent
 dimensions, and an exact readout of how each gene got its weight.
 
-**New `BAE.fit(design_key=..., design_dims=...)` and `BAEConfig.design_lambda`:
+**New `BAE.fit(design_key=...)` and `BAEConfig.design_lambda`:
 design-guided gene selection.** Reconstruction loss favours the major variance
 axes, so a condition effect on ten genes rarely earns a dimension of its own.
-`design_key` names an obs column (or several) and adds, on the dimensions in
-`design_dims`, the loss `½ Σ_k ||(I − P) z_k||²` — the latent variance the
+`design_key` names an obs column (or several) and adds, on a block of latent
+dimensions, the loss `½ Σ_k ||(I − P) z_k||²` — the latent variance the
 encoded design does *not* explain, `P` projecting onto its columns plus an
 intercept. Summed over cells like the reconstruction target, its gradient
 `(I − P) z_k` removes a fraction `target_optim_lr · design_lambda` of the
@@ -21,9 +21,9 @@ within-group residual from the boosting target and leaves the group-mean pattern
 untouched. The step is applied after the reconstruction step and the Löwdin
 orthogonalization, so the constraint is exact on the constrained dimensions and
 the orthogonality between constrained and free dimensions is the approximate
-one. `design_dims` defaults to the first `min(q, latent_dim)` dimensions, `q`
-the number of encoded design columns, because the design subspace has that
-rank. The covariate never enters the encoder, so `transform` stays gene-only,
+one. The block defaults to the first `min(q, latent_dim)` dimensions, `q` the
+number of encoded design columns, because the design subspace has that rank;
+a dict `{variable: [dims]}` places it explicitly. The covariate never enters the encoder, so `transform` stays gene-only,
 and the term also applies inside `stability_selection`, whose loop now shares
 the boosting step with `fit` rather than mirroring it.
 
@@ -43,7 +43,7 @@ recorded for `disentanglement_lambda` in 0.5.0.
 compares squared scores, so halving the residual only quarters a competitor's
 score. On planted data (1,000 cells, 500 genes, three cell types, ten non-marker
 genes shifted by one standard deviation between two conditions, three seeds,
-`latent_dim=6`, `design_dims=[0]`, 150 iterations) `design_lambda` 0, 0.25 and
+`latent_dim=6`, `design_key={"cond": [0]}`, 150 iterations) `design_lambda` 0, 0.25 and
 0.5 all left the constrained dimension at design R² 0.001 with none of the ten
 genes selected, while `1` gave R² 0.72 with precision and recall 1.0, and raised
 marker-recovery F1 on the *free* dimensions from 0.63 to 0.84 because the
@@ -137,15 +137,15 @@ each.** `design_key` as a list assigns consecutive blocks in order, as wide as
 each variable's encoded columns; as a dict `{variable: [dims]}` explicitly.
 `design_lambda` accepts a dict with one strength per variable, missing ones
 defaulting to 1; `uns["bae"]["design_lambda"]` is now always that dict, and
-`design_blocks` and `latent_design_r2_per_block` report the assignment and each
-block's R² on its own variable. A block keeps the part of the target its
+`design_blocks` reports the assignment and `latent_design_r2_per_dim` scores a
+block's dimensions against its own variable. A block keeps the part of the target its
 variable explains *beyond* the other variables, `P_J − P_{J∖v}`, so what two
 confounded variables share is filtered out of both blocks. This changes what a
 multi-variable `design_key` did before this entry's release (one joint
 projection, the orthogonalization deciding which dimension carried what), and
 the intercept is now removed from the kept part too, which is zero on centred
 data. On the planted data with a second orthogonal variable, TODO_BLOCKS_CL
-`design_dims` stays valid for a single variable only.
+
 
 `plot_selection_trace` and `plot_selection_paths` gain `decided_by`, the part
 whose counterfactual the markers flag against, defaulting to `no_design` when a

@@ -263,7 +263,7 @@ def test_design_part_is_zero_off_the_constrained_dims_without_orthogonalization(
     other dimensions through the column mixing; without it, it cannot."""
     _require_bae()
     adata = _planted()
-    _fit(adata, design_key="cond", design_dims=[1], config=dict(disentanglement="none"))
+    _fit(adata, design_key={"cond": [1]}, config=dict(disentanglement="none"))
     design = adata.varm["BAE_encoder_weights_design"]
     assert np.abs(design[:, [0, 2]]).max() < 1e-6 * max(np.abs(design).max(), 1e-12) + 1e-9
     assert np.abs(design[:, 1]).max() > 0
@@ -279,16 +279,11 @@ def test_default_dims_follow_the_design_rank_and_arguments_are_validated():
     assert adata.uns["bae"]["design_dims"].tolist() == [0, 1, 2]
     _fit(adata, design_key="cond")
     assert adata.uns["bae"]["design_dims"].tolist() == [0]
-    assert adata.uns["bae"]["design_columns"] == ["cond[ko]"] or adata.uns["bae"][
-        "design_columns"
-    ] == ["cond[wt]"]
 
-    with pytest.raises(ValueError, match="without a design_key"):
-        _fit(adata, design_dims=[0])
-    with pytest.raises(ValueError, match="design_dims"):
-        _fit(adata, design_key="cond", design_dims=[3])
-    with pytest.raises(ValueError, match="design_dims"):
-        _fit(adata, design_key="cond", design_dims=[0, 0])
+    with pytest.raises(ValueError, match="disjoint"):
+        _fit(adata, design_key={"cond": [3]})
+    with pytest.raises(ValueError, match="disjoint"):
+        _fit(adata, design_key={"cond": [0, 0]})
     with pytest.raises(ValueError, match="init_pca"):
         _fit(adata, design_key="cond", init_pca=True)
     with pytest.raises(ValueError, match="boosting_independent"):
@@ -366,8 +361,8 @@ def test_design_state_survives_save_and_load(tmp_path):
     model = _fit(adata, design_key="cond")
     path = model.save(tmp_path / "design.pt")
     loaded = BAE.load(path)
-    assert loaded._design_dims.tolist() == [0]
-    assert loaded._design_encoding.obs_columns == ["cond"]
+    assert {v: d.tolist() for v, d in loaded._design_blocks.items()} == {"cond": [0]}
+    assert loaded._design_lambdas == {"cond": 1.0}
     for name, part in model._encoder_components.items():
         np.testing.assert_array_equal(loaded._encoder_components[name], part)
     np.testing.assert_array_equal(
@@ -398,9 +393,14 @@ def test_design_readout_survives_h5ad(tmp_path):
     import anndata as ad
 
     adata = _planted()
-    _fit(adata, design_key="cond")
+    _fit(adata, design_key="cond", decompose_key="cond")
     adata.write_h5ad(tmp_path / "design.h5ad")
     back = ad.read_h5ad(tmp_path / "design.h5ad")
+    assert list(back.varm["BAE_residual_variance_share"].columns) == [
+        "between_cond",
+        "mean",
+        "within",
+    ]
     np.testing.assert_array_equal(
         back.uns["bae"]["selection_trace"]["gene"], adata.uns["bae"]["selection_trace"]["gene"]
     )
@@ -532,7 +532,7 @@ def test_decomposition_is_exact_and_leaves_the_fit_bitwise_unchanged(mode):
     assert set(parts) == expected
     np.testing.assert_allclose(_parts_sum(single), W, atol=1e-6)
     shares = single.varm["BAE_residual_variance_share"]
-    assert single.uns["bae"]["residual_variance_share_parts"] == ["between_cond", "mean", "within"]
+    assert list(shares.columns) == ["between_cond", "mean", "within"]
     np.testing.assert_allclose(shares.sum(axis=1), 1.0, atol=1e-5)
     assert "BAE_encoder_weights_design" not in single.varm
     assert "design_key" not in single.uns["bae"]
@@ -566,11 +566,9 @@ def test_decomposition_counterfactuals_find_the_planted_programmes():
     assert (counter["between_cond"] < 8).mean() > 0.8
     assert ((counter["between_sex"] >= 8) & (counter["between_sex"] < 14)).mean() > 0.8
     assert ((counter["strata"] >= 20) & (counter["strata"] < 30)).mean() > 0.8
-    shares = adata.varm["BAE_residual_variance_share"]
-    names = adata.uns["bae"]["residual_variance_share_parts"]
-    col = {n: shares[:, i] for i, n in enumerate(names)}
-    assert col["between_cond"][:8].min() > 0.1 > col["between_cond"][8:].max()
-    assert col["between_sex"][8:14].min() > 0.1 > col["between_sex"][14:].max()
+    col = adata.varm["BAE_residual_variance_share"]
+    assert col["between_cond"].iloc[:8].min() > 0.1 > col["between_cond"].iloc[8:].max()
+    assert col["between_sex"].iloc[8:14].min() > 0.1 > col["between_sex"].iloc[14:].max()
     assert np.abs(col["shared"]).max() < 0.02
     # Every part scores the pick the leader made: on a step the plain fit
     # spends on a condition gene, between_cond ranks it among its eight.
@@ -590,8 +588,7 @@ def test_design_blocks_list_and_dict_forms_and_per_variable_lambda():
     assert {v: d.tolist() for v, d in uns["design_blocks"].items()} == {"cond": [0], "sex": [1]}
     assert uns["design_lambda"] == {"cond": 1.0, "sex": 1.0}
     assert uns["design_dims"].tolist() == [0, 1]
-    per_block = uns["latent_design_r2_per_block"]
-    assert per_block["cond"][0] > 0.5 and per_block["sex"][0] > 0.5
+    assert uns["latent_design_r2_per_dim"][0] > 0.5 and uns["latent_design_r2_per_dim"][1] > 0.5
     # Each block carries its own variable, not the other one.
     Z = adata.obsm["X_bae"]
     sex = (adata.obs["sex"] == "f").to_numpy(dtype=float)[:, None]
@@ -607,16 +604,12 @@ def test_design_blocks_list_and_dict_forms_and_per_variable_lambda():
     assert np.abs(design[:, 0]).max() == 0.0  # lambda 0: no design step in that block
     assert np.abs(design[:, 1]).max() == 0.0  # unconstrained dimension
     assert np.abs(design[:, 2]).max() > 0.0
-    assert uns["latent_design_r2_per_block"]["cond"][0] > 0.5
+    assert uns["latent_design_r2_per_dim"][2] > 0.5
 
     with pytest.raises(ValueError, match="disjoint"):
         _fit(adata, design_key={"cond": [0], "sex": [0, 1]})
     with pytest.raises(ValueError, match="disjoint"):
         _fit(adata, design_key={"cond": [0], "sex": [3]})
-    with pytest.raises(ValueError, match="dict form"):
-        _fit(adata, design_key=["cond", "sex"], design_dims=[0, 1])
-    with pytest.raises(ValueError, match="dict form"):
-        _fit(adata, design_key={"cond": [0]}, design_dims=[0])
     with pytest.raises(ValueError, match="not in design_key"):
         _fit(adata, design_key="cond", config=dict(design_lambda={"sex": 0.5}))
     with pytest.raises(ValueError, match="'sex'"):
