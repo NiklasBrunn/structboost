@@ -38,14 +38,25 @@ class AllboostHistory:
     Attributes
     ----------
     selection
-        Selected feature index at each step, shape (n_targets, stepno).
+        Selected feature index at each step, shape (n_targets, stepno). For a
+        target that *replays* another's path (``selection_from``) this holds the
+        feature its own criterion would have chosen at that step -- the
+        counterfactual pick -- while the leader's pick is what was applied.
+    update
+        Coefficient increment applied to the selected feature at each step,
+        shape (n_targets, stepno). Steps that never ran (see ``selection`` = -1)
+        hold 0. Excludes the mandatory pre-step, whose coefficients are not
+        selected.
     beta_path
         Coefficient path after each step, shape (n_targets, stepno, n_features).
-        This can be memory-intensive; only enabled when explicitly requested.
+        ``None`` when ``return_history="steps"``: the full path costs
+        ``n_targets * stepno * n_features`` floats, which the per-step trace
+        above does not.
     """
 
     selection: NDArray[np.int64]
-    beta_path: NDArray[np.float64]
+    update: NDArray[np.float64]
+    beta_path: NDArray[np.float64] | None = None
 
 
 def _validate_mandatory_features(
@@ -176,6 +187,7 @@ def allboost(
     beta_init: NDArray[np.floating] | None = None,
     covcache: _CovarianceCache | None = None,
     col_norms_sq: NDArray[np.floating] | None = None,
+    selection_from: NDArray[np.intp] | None = None,
     stepno: int = 20,
     nu: float = 0.1,
     csf: float = 0.9,
@@ -195,11 +207,12 @@ def allboost(
     beta_init: NDArray[np.floating] | None = None,
     covcache: _CovarianceCache | None = None,
     col_norms_sq: NDArray[np.floating] | None = None,
+    selection_from: NDArray[np.intp] | None = None,
     stepno: int = 20,
     nu: float = 0.1,
     csf: float = 0.9,
     independent: bool = True,
-    return_history: Literal[True],
+    return_history: Literal[True, "steps"],
     return_covcache: Literal[False] = False,
 ) -> tuple[NDArray[np.floating], AllboostHistory]: ...
 
@@ -214,6 +227,7 @@ def allboost(
     beta_init: NDArray[np.floating] | None = None,
     covcache: _CovarianceCache | None = None,
     col_norms_sq: NDArray[np.floating] | None = None,
+    selection_from: NDArray[np.intp] | None = None,
     stepno: int = 20,
     nu: float = 0.1,
     csf: float = 0.9,
@@ -233,11 +247,12 @@ def allboost(
     beta_init: NDArray[np.floating] | None = None,
     covcache: _CovarianceCache | None = None,
     col_norms_sq: NDArray[np.floating] | None = None,
+    selection_from: NDArray[np.intp] | None = None,
     stepno: int = 20,
     nu: float = 0.1,
     csf: float = 0.9,
     independent: bool = True,
-    return_history: Literal[True],
+    return_history: Literal[True, "steps"],
     return_covcache: Literal[True],
 ) -> tuple[NDArray[np.floating], AllboostHistory, _CovarianceCache]: ...
 
@@ -251,11 +266,12 @@ def allboost(
     beta_init: NDArray[np.floating] | None = None,
     covcache: _CovarianceCache | None = None,
     col_norms_sq: NDArray[np.floating] | None = None,
+    selection_from: NDArray[np.intp] | None = None,
     stepno: int = 20,
     nu: float = 0.1,
     csf: float = 0.9,
     independent: bool = True,
-    return_history: bool = False,
+    return_history: bool | Literal["steps"] = False,
     return_covcache: bool = False,
 ) -> (
     NDArray[np.floating]
@@ -320,6 +336,23 @@ def allboost(
         once per training iteration, in :meth:`structboost.BAE.fit`. It carries
         the same staleness contract as ``covcache``: reuse it with the same
         ``sourcemat`` only.
+    selection_from : ndarray of shape (n_targets,), optional
+        Path replay. Target ``t`` with ``selection_from[t] != t`` does not choose
+        its own features: at every step it applies the feature selected for the
+        *leader* target ``selection_from[t]`` (which must come earlier, i.e. have
+        a lower index), while its own criterion is still evaluated and its argmax
+        recorded in ``history.selection[t]`` as the counterfactual pick. The
+        learning-rate and penalty adaptation follow the path, so a follower is
+        fitted by exactly the linear operator the leader's path defines.
+
+        That linearity is the point: if the leader's target is a sum
+        ``t_1 + t_2`` and two followers carry ``t_1`` and ``t_2``, their
+        coefficients sum to the leader's, so a coefficient can be attributed
+        exactly to the parts of the target that produced it. This is how
+        :meth:`structboost.BAE.fit` splits encoder weights into reconstruction
+        and design contributions. Requires ``independent=True`` (a follower's
+        adaptation would otherwise leak into the shared state) and the same
+        ``mandatory_features`` for a follower and its leader.
     stepno : int, default=20
         Number of boosting iterations per target.
     nu : float, default=0.1
@@ -334,9 +367,11 @@ def allboost(
         Note: the internal predictor–predictor covariance cache depends only on
         `sourcemat` and is therefore shared across targets for efficiency.
         If False, parameters persist across targets.
-    return_history : bool, default=False
+    return_history : bool or "steps", default=False
         If True, also return an `AllboostHistory` object containing the selected
-        feature at each step and the coefficient path (after each step).
+        feature at each step, the increment it received, and the coefficient path
+        (after each step). ``"steps"`` returns the same without ``beta_path``,
+        which is the memory-heavy part.
     return_covcache : bool, default=False
         If True, also return the (possibly lazily computed) covariance cache.
         Useful when covcache was not provided and you want to reuse it later.
@@ -398,6 +433,9 @@ def allboost(
         # which look like a fitted model that selected nothing.
         raise ValueError(f"stepno must be >= 1, got {stepno}")
 
+    if return_history not in (True, False, "steps"):
+        raise ValueError(f"return_history must be True, False or 'steps', got {return_history!r}")
+
     n, p = sourcemat.shape
     k = targetmat.shape[1]
 
@@ -457,12 +495,35 @@ def allboost(
             "Remove constant features before calling allboost."
         )
 
+    if selection_from is not None:
+        selection_from = np.asarray(selection_from)
+        if selection_from.shape != (k,) or not np.issubdtype(selection_from.dtype, np.integer):
+            raise ValueError(f"selection_from must be an integer array of shape ({k},)")
+        if ((selection_from < 0) | (selection_from > np.arange(k))).any():
+            raise ValueError(
+                "selection_from[t] must be in [0, t]: a follower can only replay a target "
+                "that comes before it"
+            )
+        if not independent:
+            raise ValueError("selection_from requires independent=True")
+        for t, leader in enumerate(selection_from):
+            if leader != t and not np.array_equal(
+                np.sort(mandatory_per_target[t]), np.sort(mandatory_per_target[leader])
+            ):
+                raise ValueError(
+                    f"target {t} replays target {leader} but their mandatory_features differ"
+                )
+    else:
+        selection_from = np.arange(k)
+
     betamat = np.zeros((k, p), dtype=np.float64)
 
-    selection_hist: NDArray[np.int64] | None = None
+    # The selection path is always recorded: a follower reads its leader's.
+    selection_hist = np.full((k, stepno), -1, dtype=np.int64)
+    applied = np.full((k, stepno), -1, dtype=np.int64)
+    update_hist = np.zeros((k, stepno), dtype=np.float64)
     beta_path: NDArray[np.float64] | None = None
-    if return_history:
-        selection_hist = np.full((k, stepno), -1, dtype=np.int64)
+    if return_history is True:
         beta_path = np.zeros((k, stepno, p), dtype=np.float64)
 
     # Covariance cache: full ndarrays retain the precomputed fast path; the
@@ -590,12 +651,19 @@ def allboost(
             criterion = numer**2 / (col_norms_sq + penvec)
             criterion[mand_idx] = -np.inf
             actualsel = int(np.argmax(criterion))
-            if selection_hist is not None:
-                selection_hist[t_idx, step] = actualsel
+            selection_hist[t_idx, step] = actualsel
+            if selection_from[t_idx] != t_idx:
+                # Replay: the leader's pick is applied, this target's own pick was
+                # recorded above as the counterfactual.
+                actualsel = int(applied[selection_from[t_idx], step])
+                if actualsel < 0:
+                    break
+            applied[t_idx, step] = actualsel
 
             # Update the winner only. `actualnom` is refreshed through the cached
             # covariance column rather than by recomputing the residual.
             actualupdate = nuvec[actualsel] * actualnom[actualsel]
+            update_hist[t_idx, step] = actualupdate
             beta[actualsel] += actualupdate
             cov_col = get_covariance_column(actualsel)
             actualnom -= actualupdate * cov_col / col_norms_sq
@@ -608,14 +676,11 @@ def allboost(
 
         betamat[t_idx, :] = beta
 
+    history = AllboostHistory(selection=selection_hist, update=update_hist, beta_path=beta_path)
     if return_history and return_covcache:
-        assert selection_hist is not None
-        assert beta_path is not None
-        return betamat, AllboostHistory(selection=selection_hist, beta_path=beta_path), _covcache
+        return betamat, history, _covcache
     if return_history:
-        assert selection_hist is not None
-        assert beta_path is not None
-        return betamat, AllboostHistory(selection=selection_hist, beta_path=beta_path)
+        return betamat, history
     if return_covcache:
         return betamat, _covcache
     return betamat
