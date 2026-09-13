@@ -129,7 +129,9 @@ rank under it; `varm["BAE_encoder_weights_<part>"]` hold the weight parts and
 `varm["BAE_residual_variance_share"]` splits every gene's residual sum of squares
 the same way, a design-free score of every gene, selected or not. The trace's
 `no_between` column is the analogue of `no_design`: the pick the fit would have
-made without the design-explained residual variance. On the planted
+made without the design-explained residual variance; on the planted data it
+flagged 75% of the 48 steps the plain fit spent on a condition gene against 7%
+of the other steps. On the planted
 data of the previous paragraphs, read through `decompose_key="cond"`, the plain
 fit selected 0, 1 and 10 of the ten condition genes over three seeds, and on
 every boosting step the between-condition part alone would have picked one of

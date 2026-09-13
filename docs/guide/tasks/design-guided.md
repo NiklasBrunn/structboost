@@ -336,7 +336,10 @@ is the gene the between-disease residual *alone* would have selected given the
 genes already entered, and `rank["between_disease"]` how far down that part had
 the winner. Single parts alone rarely agree with the pick, since the target is
 dominated by the carried code `z`; the no-between column is the one to read
-for "was this gene selected because of the design".
+for "was this gene selected because of the design". On the planted data the
+plain fit spent 48 of its 900 boosting steps (three seeds) on a condition
+gene, and without the between-condition variance 75% of those picks would have
+gone to another gene, against 7% of all other steps.
 `BAE_residual_variance_share` is the per-gene version: the share of a gene's
 residual variance that sits between the design groups, a design-free score of
 every gene, not only the selected ones.
