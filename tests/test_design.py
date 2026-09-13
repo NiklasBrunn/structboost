@@ -174,7 +174,7 @@ def test_attribution_is_exact_and_belongs_to_the_restored_iteration():
     # their sum *is* the float64 matrix the encoder was cast from.
     assert adata.uns["bae"]["design_dims"].tolist() == [0]
     assert adata.uns["bae"]["design_key"] == ["cond"]
-    assert adata.uns["bae"]["design_lambda"] == 0.5
+    assert adata.uns["bae"]["design_lambda"] == {"cond": 0.5}
 
     carry = adata.varm["BAE_encoder_weights_carry"]
     np.testing.assert_array_equal((carry + recon + design).astype(np.float32), W)
@@ -482,3 +482,208 @@ def test_track_selection_path_logs_every_iteration_without_changing_the_fit():
     path = guided.uns["bae"]["selection_path"]
     assert any(np.array_equal(path["gene"][i], trace["gene"]) for i in range(path["gene"].shape[0]))
     assert model._selection_path is not None
+
+
+# --- reconstruction-gradient decomposition and per-variable blocks ------------
+
+
+def _planted2(seed=0, n=600, p=80):
+    """Two orthogonal planted variables (condition, sex) and a cell-type programme."""
+    import anndata as ad
+    import pandas as pd
+
+    rng = np.random.default_rng(seed)
+    X = rng.standard_normal((n, p)).astype(np.float32)
+    cond, sex, ct = np.arange(n) % 2, (np.arange(n) // 2) % 2, np.arange(n) // 200
+    X[:, :8] += 1.2 * (cond[:, None] - 0.5)
+    X[:, 8:14] += 1.2 * (sex[:, None] - 0.5)
+    X[:, 20:30] += 1.5 * (ct[:, None] == 1)
+    X = ((X - X.mean(0)) / X.std(0)).astype(np.float32)
+    adata = ad.AnnData(X)
+    adata.var_names = [f"g{i}" for i in range(p)]
+    adata.obs["cond"] = pd.Categorical(np.where(cond == 1, "ko", "wt"))
+    adata.obs["sex"] = pd.Categorical(np.where(sex == 1, "f", "m"))
+    adata.obs["ct"] = pd.Categorical(ct.astype(str))
+    return adata
+
+
+def _parts_sum(adata):
+    parts = adata.uns["bae"]["attribution_parts"]
+    return sum(adata.varm[f"BAE_encoder_weights_{p}"] for p in parts)
+
+
+@pytest.mark.parametrize("mode", ["orthogonal", "correlation"])
+def test_decomposition_is_exact_and_leaves_the_fit_bitwise_unchanged(mode):
+    """`decompose_key` only *reads* the reconstruction gradient: the encoder is
+    the plain encoder bitwise, the parts add up to it, and each gene's residual
+    sum of squares is split into shares that sum to one."""
+    _require_bae()
+    config = dict(disentanglement=mode)
+    plain = _planted2()
+    _fit(plain, config=config)
+    W = plain.varm["BAE_encoder_weights"]
+
+    single = _planted2()
+    _fit(single, decompose_key="cond", config=config)
+    np.testing.assert_array_equal(single.varm["BAE_encoder_weights"], W)
+    parts = single.uns["bae"]["attribution_parts"]
+    expected = {"between_cond", "mean", "within", "carry"}
+    expected |= {"correlation"} if mode == "correlation" else set()
+    assert set(parts) == expected
+    np.testing.assert_allclose(_parts_sum(single), W, atol=1e-6)
+    shares = single.varm["BAE_residual_variance_share"]
+    assert single.uns["bae"]["residual_variance_share_parts"] == ["between_cond", "mean", "within"]
+    np.testing.assert_allclose(shares.sum(axis=1), 1.0, atol=1e-5)
+    assert "BAE_encoder_weights_design" not in single.varm
+    assert "design_key" not in single.uns["bae"]
+    assert single.uns["bae"]["decompose_key"] == ["cond"]
+
+    multi = _planted2()
+    _fit(multi, decompose_key=["cond", "sex"], decompose_within="ct", config=config)
+    np.testing.assert_array_equal(multi.varm["BAE_encoder_weights"], W)
+    parts = multi.uns["bae"]["attribution_parts"]
+    assert {"between_cond", "between_sex", "shared", "strata", "within"} <= set(parts)
+    assert "mean" not in parts
+    np.testing.assert_allclose(_parts_sum(multi), W, atol=1e-6)
+    np.testing.assert_allclose(multi.varm["BAE_residual_variance_share"].sum(axis=1), 1, atol=1e-5)
+    assert multi.uns["bae"]["decompose_within"] == ["ct"]
+    trace = multi.uns["bae"]["selection_trace"]
+    assert set(trace["counterfactual_gene"]) == expected - {"mean", "carry"} | {
+        "between_sex",
+        "shared",
+        "strata",
+    }
+    assert "carry" not in trace["rank"] and "carry" in trace["delta"]
+
+
+def test_decomposition_counterfactuals_find_the_planted_programmes():
+    """Each between part alone would pick genes of its own variable, the strata
+    part the cell-type programme; two orthogonal variables share nothing."""
+    _require_bae()
+    adata = _planted2()
+    _fit(adata, decompose_key=["cond", "sex"], decompose_within="ct")
+    counter = adata.uns["bae"]["selection_trace"]["counterfactual_gene"]
+    assert (counter["between_cond"] < 8).mean() > 0.8
+    assert ((counter["between_sex"] >= 8) & (counter["between_sex"] < 14)).mean() > 0.8
+    assert ((counter["strata"] >= 20) & (counter["strata"] < 30)).mean() > 0.8
+    shares = adata.varm["BAE_residual_variance_share"]
+    names = adata.uns["bae"]["residual_variance_share_parts"]
+    col = {n: shares[:, i] for i, n in enumerate(names)}
+    assert col["between_cond"][:8].min() > 0.1 > col["between_cond"][8:].max()
+    assert col["between_sex"][8:14].min() > 0.1 > col["between_sex"][14:].max()
+    assert np.abs(col["shared"]).max() < 0.02
+    # Every part scores the pick the leader made: on a step the plain fit
+    # spends on a condition gene, between_cond ranks it among its eight.
+    trace = adata.uns["bae"]["selection_trace"]
+    cond_steps = trace["gene"] < 8
+    assert cond_steps.any()
+    assert (trace["rank"]["between_cond"][cond_steps] < 8).all()
+
+
+def test_design_blocks_list_and_dict_forms_and_per_variable_lambda():
+    _require_bae()
+    from structboost._utils import latent_r2_per_dim
+
+    adata = _planted2()
+    _fit(adata, design_key=["cond", "sex"])
+    uns = adata.uns["bae"]
+    assert {v: d.tolist() for v, d in uns["design_blocks"].items()} == {"cond": [0], "sex": [1]}
+    assert uns["design_lambda"] == {"cond": 1.0, "sex": 1.0}
+    assert uns["design_dims"].tolist() == [0, 1]
+    per_block = uns["latent_design_r2_per_block"]
+    assert per_block["cond"][0] > 0.5 and per_block["sex"][0] > 0.5
+    # Each block carries its own variable, not the other one.
+    Z = adata.obsm["X_bae"]
+    sex = (adata.obs["sex"] == "f").to_numpy(dtype=float)[:, None]
+    cond = (adata.obs["cond"] == "ko").to_numpy(dtype=float)[:, None]
+    assert latent_r2_per_dim(sex, Z)[0] < 0.1 < latent_r2_per_dim(sex, Z)[1]
+    assert latent_r2_per_dim(cond, Z)[1] < 0.1 < latent_r2_per_dim(cond, Z)[0]
+
+    _fit(adata, design_key={"cond": [2], "sex": [0]}, config=dict(design_lambda={"sex": 0.0}))
+    uns = adata.uns["bae"]
+    assert {v: d.tolist() for v, d in uns["design_blocks"].items()} == {"cond": [2], "sex": [0]}
+    assert uns["design_lambda"] == {"cond": 1.0, "sex": 0.0}
+    design = adata.varm["BAE_encoder_weights_design"]
+    assert np.abs(design[:, 0]).max() == 0.0  # lambda 0: no design step in that block
+    assert np.abs(design[:, 1]).max() == 0.0  # unconstrained dimension
+    assert np.abs(design[:, 2]).max() > 0.0
+    assert uns["latent_design_r2_per_block"]["cond"][0] > 0.5
+
+    with pytest.raises(ValueError, match="disjoint"):
+        _fit(adata, design_key={"cond": [0], "sex": [0, 1]})
+    with pytest.raises(ValueError, match="disjoint"):
+        _fit(adata, design_key={"cond": [0], "sex": [3]})
+    with pytest.raises(ValueError, match="dict form"):
+        _fit(adata, design_key=["cond", "sex"], design_dims=[0, 1])
+    with pytest.raises(ValueError, match="dict form"):
+        _fit(adata, design_key={"cond": [0]}, design_dims=[0])
+    with pytest.raises(ValueError, match="not in design_key"):
+        _fit(adata, design_key="cond", config=dict(design_lambda={"sex": 0.5}))
+    with pytest.raises(ValueError, match="'sex'"):
+        _fit(adata, design_key=["cond", "sex"], config=dict(design_lambda={"sex": 1.5}))
+    with pytest.raises(ValueError, match="design_lambda"):
+        BAEConfig(design_lambda={"cond": -1.0})
+
+
+def test_design_key_and_decompose_key_combine():
+    _require_bae()
+    adata = _planted2()
+    _fit(adata, design_key="cond", decompose_key=["cond", "sex"])
+    parts = adata.uns["bae"]["attribution_parts"]
+    assert set(parts) == {
+        "between_cond",
+        "between_sex",
+        "shared",
+        "mean",
+        "within",
+        "carry",
+        "design",
+    }
+    np.testing.assert_allclose(_parts_sum(adata), adata.varm["BAE_encoder_weights"], atol=1e-6)
+    counter = adata.uns["bae"]["selection_trace"]["counterfactual_gene"]
+    assert "no_design" in counter and "design" in counter
+    with pytest.raises(ValueError, match="decompose_within"):
+        _fit(adata, decompose_within="ct")
+    with pytest.raises(ValueError, match="different columns"):
+        _fit(adata, decompose_key="cond", decompose_within="cond")
+
+
+def test_blocks_and_decomposition_survive_save_load_and_stability(tmp_path):
+    _require_bae()
+    from structboost import BAE
+
+    adata = _planted2()
+    model = _fit(
+        adata,
+        design_key={"cond": [2], "sex": [0]},
+        decompose_key=["cond", "sex"],
+        decompose_within="ct",
+        config=dict(design_lambda={"sex": 0.5}),
+    )
+    loaded = BAE.load(model.save(tmp_path / "blocks.pt"))
+    assert {v: d.tolist() for v, d in loaded._design_blocks.items()} == {"cond": [2], "sex": [0]}
+    assert loaded._design_lambdas == {"cond": 1.0, "sex": 0.5}
+    assert loaded._decompose_columns == ["cond", "sex"]
+    assert loaded._decompose_within == ["ct"]
+    for name, part in model._encoder_components.items():
+        np.testing.assert_array_equal(loaded._encoder_components[name], part)
+    np.testing.assert_array_equal(loaded.transform(adata.copy()), model.transform(adata.copy()))
+    # Stability continues the block-guided alternation; the condition block is dim 2.
+    result = loaded.stability_selection(adata, n_runs=3, seed=0, verbose=False)
+    assert result.frequency[:8, 2].mean() > result.frequency[:8, 0].mean()
+
+
+def test_trace_and_path_plots_take_a_decided_by_part():
+    _require_bae()
+    pytest.importorskip("matplotlib").use("Agg")
+    from structboost import plot_selection_paths, plot_selection_trace
+
+    adata = _planted2()
+    _fit(adata, decompose_key=["cond", "sex"])
+    fig, axes = plot_selection_trace(adata, dims=[0])  # defaults to "within"
+    assert axes.shape == (1,)
+    plot_selection_trace(adata, dims=[0, 1], decided_by="between_cond")
+    fig, axes = plot_selection_paths(adata, dims=[0], decided_by="between_sex")
+    assert axes.shape == (1,)
+    with pytest.raises(ValueError, match="decided_by"):
+        plot_selection_paths(adata, decided_by="design")

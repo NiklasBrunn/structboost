@@ -401,9 +401,40 @@ _PART_COLORS = {
     "total": _INK,
     "carry": "#CFCFCF",
     "recon": "#7F7F7F",
+    "within": "#7F7F7F",
+    "mean": "#E0E0E0",
+    "strata": "#C9B458",
+    "shared": "#8E6BB8",
     "design": "#009E73",
     "correlation": "#CC79A7",
 }
+#: ``between_<variable>`` parts take these in order of appearance.
+_BETWEEN_HUES = ("#E69F00", "#56B4E9", "#B4472C", "#5F9E3A")
+
+
+def _part_colors(names) -> dict[str, str]:
+    """Colour per part name: fixed for the known parts, a hue cycle for ``between_*``."""
+    colors, hue = {}, 0
+    for name in names:
+        if name in _PART_COLORS:
+            colors[name] = _PART_COLORS[name]
+        elif name.startswith("between_"):
+            colors[name] = _BETWEEN_HUES[hue % len(_BETWEEN_HUES)]
+            hue += 1
+        else:
+            colors[name] = _OTHER
+    return colors
+
+
+def _decided_against(trace, decided_by: str | None) -> str:
+    """Which counterfactual flags a pick as decided: ``no_design`` when a design step
+    exists, else ``within`` (a pick the within part alone would not have made)."""
+    available = list(trace["counterfactual_gene"])
+    if decided_by is None:
+        decided_by = next((n for n in ("no_design", "within") if n in available), available[0])
+    if decided_by not in available:
+        raise ValueError(f"decided_by must be one of {available}, got {decided_by!r}")
+    return decided_by
 
 
 def _palette_for(n_groups: int) -> tuple[str, ...]:
@@ -802,12 +833,13 @@ def _draw_attribution(ax, parts, w, names, rank, n_genes) -> str:
     order = np.argsort(np.abs(rank))[::-1][:n_genes][::-1]
     n_parts = len(parts)
     height = 0.8 / n_parts
+    colors = _part_colors(parts)
     for i, (name, values) in enumerate(parts.items()):
         ax.barh(
             np.arange(order.size) + (i - (n_parts - 1) / 2) * height,
             values[order],
             height=height,
-            color=_PART_COLORS.get(name, _OTHER),
+            color=colors[name],
         )
     _zero(ax, "x")
     ax.set_yticks(np.arange(order.size))
@@ -1205,10 +1237,9 @@ def plot_latent_dimensions(
                 label=(f"{_plural(n_grey, 'further group')} (labelled in the violins)"),
             )
         )
+    part_colors = _part_colors(parts)
     part_key = [
-        Patch(
-            facecolor=_PART_COLORS.get(n, _OTHER), edgecolor="none", label=f"{n} part of the weight"
-        )
+        Patch(facecolor=part_colors[n], edgecolor="none", label=f"{n} part of the weight")
         for n in parts
     ]
     handles = handles + split_key + part_key
@@ -1683,6 +1714,7 @@ def plot_selection_trace(
     adata,
     *,
     dims: Sequence[int] | None = None,
+    decided_by: str | None = None,
     gene_names: str | None = None,
     figsize: tuple[float, float] | None = None,
     dpi: int = 150,
@@ -1711,6 +1743,12 @@ def plot_selection_trace(
         Fitted AnnData carrying ``uns["bae"]["selection_trace"]``.
     dims
         Latent dimensions to draw; default all.
+    decided_by
+        Which part's counterfactual flags a pick: a step where that part alone
+        would have taken another gene gets the hollow marker. Default
+        ``"no_design"`` when the fit had a design step, else ``"within"`` (from
+        ``decompose_key``), so the marker reads "the design, or the design
+        variance, decided this pick".
     gene_names
         ``adata.var`` column to label genes by; default ``var_names``.
     figsize, dpi
@@ -1728,8 +1766,9 @@ def plot_selection_trace(
     if trace is None:
         raise KeyError(
             "adata.uns['bae']['selection_trace'] not found; it is written by "
-            "BAE.fit(design_key=...)"
+            "BAE.fit(design_key=...) or BAE.fit(decompose_key=...)"
         )
+    decided_by = _decided_against(trace, decided_by)
     gene = np.asarray(trace["gene"])
     latent_dim, stepno = gene.shape
     dims = list(range(latent_dim)) if dims is None else list(dims)
@@ -1740,8 +1779,9 @@ def plot_selection_trace(
         if gene_names
         else np.asarray(adata.var_names, dtype=str)
     )
-    counter = np.asarray(trace["counterfactual_gene"]["no_design"])
+    counter = np.asarray(trace["counterfactual_gene"][decided_by])
     steps = np.arange(1, stepno + 1)
+    colors = _part_colors(trace["delta"])
 
     fig, axes = plt.subplots(
         len(dims),
@@ -1759,7 +1799,7 @@ def plot_selection_trace(
                 steps[ran],
                 np.cumsum(np.asarray(delta)[dim][ran]),
                 where="mid",
-                color=_PART_COLORS.get(name, _OTHER),
+                color=colors[name],
                 lw=1.8 if name == "total" else 1.2,
                 label=name,
             )
@@ -1791,9 +1831,7 @@ def plot_selection_trace(
         ax.spines[["top", "right"]].set_visible(False)
         ax.tick_params(color=_MUTED, labelsize=_TICK, labelcolor=_MUTED, length=3)
     axes[-1].set_xlabel("boosting step", fontsize=_LABEL, color=_MUTED)
-    handles = [
-        Line2D([], [], color=_PART_COLORS.get(n, _OTHER), lw=1.6, label=n) for n in trace["delta"]
-    ] + [
+    handles = [Line2D([], [], color=colors[n], lw=1.6, label=n) for n in trace["delta"]] + [
         Line2D(
             [],
             [],
@@ -1801,7 +1839,7 @@ def plot_selection_trace(
             ls="",
             markerfacecolor="white",
             markeredgecolor=_INK,
-            label="design step decided the pick",
+            label=f"{decided_by} alone would have picked another gene",
         )
     ]
     fig.legend(
@@ -1819,6 +1857,7 @@ def plot_selection_paths(
     adata,
     *,
     dims: Sequence[int] | None = None,
+    decided_by: str | None = None,
     n_genes: int = 12,
     gene_names: str | None = None,
     figsize: tuple[float, float] | None = None,
@@ -1843,6 +1882,10 @@ def plot_selection_paths(
         Fitted AnnData carrying ``uns["bae"]["selection_trace"]``.
     dims
         Latent dimensions to draw, one axis each; default all.
+    decided_by
+        Which part's counterfactual colours a jump; see
+        :func:`plot_selection_trace`. Default ``"no_design"`` when the fit had a
+        design step, else ``"within"``.
     n_genes
         Genes per dimension, the largest final coefficients first.
     gene_names
@@ -1863,11 +1906,13 @@ def plot_selection_paths(
     if trace is None:
         raise KeyError(
             "adata.uns['bae']['selection_trace'] not found; it is written by "
-            "BAE.fit(design_key=...)"
+            "BAE.fit(design_key=...) or BAE.fit(decompose_key=...)"
         )
+    decided_by = _decided_against(trace, decided_by)
     gene = np.asarray(trace["gene"])
     delta = np.asarray(trace["delta"]["total"])
-    decided = np.asarray(trace["counterfactual_gene"]["no_design"]) != gene
+    decided = np.asarray(trace["counterfactual_gene"][decided_by]) != gene
+    accent = _PART_COLORS["design"] if decided_by == "no_design" else _BETWEEN_HUES[0]
     latent_dim, stepno = gene.shape
     dims = list(range(latent_dim)) if dims is None else list(dims)
     if any(d < 0 or d >= latent_dim for d in dims):
@@ -1902,9 +1947,7 @@ def plot_selection_paths(
                     break
                 segments.append([(s, paths[i, s]), (s + 1, paths[i, s + 1])])
                 if picks[s] == g:
-                    colors.append(
-                        _PART_COLORS["design"] if decided[dim, s] else _PART_COLORS["recon"]
-                    )
+                    colors.append(accent if decided[dim, s] else _PART_COLORS["recon"])
                     widths.append(2.4)
                 else:
                     colors.append(_FAINT)
@@ -1945,8 +1988,10 @@ def plot_selection_paths(
         ax.tick_params(color=_MUTED, labelsize=_TICK, labelcolor=_MUTED, length=3)
     axes[-1].set_xlabel("boosting step", fontsize=_LABEL, color=_MUTED)
     handles = [
-        Line2D([], [], color=_PART_COLORS["recon"], lw=2.4, label="pick made on both objectives"),
-        Line2D([], [], color=_PART_COLORS["design"], lw=2.4, label="design step decided the pick"),
+        Line2D(
+            [], [], color=_PART_COLORS["recon"], lw=2.4, label=f"{decided_by} alone picks it too"
+        ),
+        Line2D([], [], color=accent, lw=2.4, label=f"{decided_by} alone would pick another gene"),
     ]
     fig.legend(handles=handles, loc="upper center", ncol=2, frameon=False, fontsize=_TICK)
     fig.tight_layout(rect=(0, 0, 0.92, 0.94))
