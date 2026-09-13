@@ -549,6 +549,7 @@ def test_decomposition_is_exact_and_leaves_the_fit_bitwise_unchanged(mode):
     assert multi.uns["bae"]["decompose_within"] == ["ct"]
     trace = multi.uns["bae"]["selection_trace"]
     assert set(trace["counterfactual_gene"]) == expected - {"mean", "carry"} | {
+        "no_between",
         "between_sex",
         "shared",
         "strata",
@@ -634,7 +635,7 @@ def test_design_key_and_decompose_key_combine():
     }
     np.testing.assert_allclose(_parts_sum(adata), adata.varm["BAE_encoder_weights"], atol=1e-6)
     counter = adata.uns["bae"]["selection_trace"]["counterfactual_gene"]
-    assert "no_design" in counter and "design" in counter
+    assert {"no_design", "no_between", "design"} <= set(counter)
     with pytest.raises(ValueError, match="decompose_within"):
         _fit(adata, decompose_within="ct")
     with pytest.raises(ValueError, match="different columns"):
@@ -673,7 +674,7 @@ def test_trace_and_path_plots_take_a_decided_by_part():
 
     adata = _planted2()
     _fit(adata, decompose_key=["cond", "sex"])
-    fig, axes = plot_selection_trace(adata, dims=[0])  # defaults to "within"
+    fig, axes = plot_selection_trace(adata, dims=[0])  # defaults to "no_between"
     assert axes.shape == (1,)
     plot_selection_trace(adata, dims=[0, 1], decided_by="between_cond")
     fig, axes = plot_selection_paths(adata, dims=[0], decided_by="between_sex")

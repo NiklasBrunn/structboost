@@ -427,11 +427,11 @@ def _part_colors(names) -> dict[str, str]:
 
 
 def _decided_against(trace, decided_by: str | None) -> str:
-    """Which counterfactual flags a pick as decided: ``no_design`` when a design step
-    exists, else ``within`` (a pick the within part alone would not have made)."""
+    """Which counterfactual flags a pick as decided: the target without the design
+    step, else without the design-explained residual variance, else the first."""
     available = list(trace["counterfactual_gene"])
     if decided_by is None:
-        decided_by = next((n for n in ("no_design", "within") if n in available), available[0])
+        decided_by = next((n for n in ("no_design", "no_between") if n in available), available[0])
     if decided_by not in available:
         raise ValueError(f"decided_by must be one of {available}, got {decided_by!r}")
     return decided_by
@@ -1746,7 +1746,8 @@ def plot_selection_trace(
     decided_by
         Which part's counterfactual flags a pick: a step where that part alone
         would have taken another gene gets the hollow marker. Default
-        ``"no_design"`` when the fit had a design step, else ``"within"`` (from
+        ``"no_design"`` when the fit had a design step, else ``"no_between"``
+        (the target without the design-explained residual variance, from
         ``decompose_key``), so the marker reads "the design, or the design
         variance, decided this pick".
     gene_names
@@ -1885,7 +1886,7 @@ def plot_selection_paths(
     decided_by
         Which part's counterfactual colours a jump; see
         :func:`plot_selection_trace`. Default ``"no_design"`` when the fit had a
-        design step, else ``"within"``.
+        design step, else ``"no_between"``.
     n_genes
         Genes per dimension, the largest final coefficients first.
     gene_names

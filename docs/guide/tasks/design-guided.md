@@ -327,11 +327,16 @@ when variables are confounded, which is information about the design, not a
 defect of the split.
 
 Read it as before: the parts are additive in the scores, but the pick is the
-argmax of their sum, so *which part decided* is the counterfactual column.
-`counterfactual_gene["between_disease"]` is the gene the between-disease
-residual alone would have selected given the genes already entered; where the
-plain fit's pick differs from it, reconstruction went elsewhere, and
-`rank["between_disease"]` says how far down that part had the winner.
+argmax of their sum, so *which part decided* is a counterfactual column.
+`counterfactual_gene["no_between"]` is the gene the fit would have selected
+had the design-explained residual variance not been there (the target without
+the between and shared parts), the analogue of `no_design`; where it differs
+from `gene`, that variance decided the pick. `counterfactual_gene["between_disease"]`
+is the gene the between-disease residual *alone* would have selected given the
+genes already entered, and `rank["between_disease"]` how far down that part had
+the winner. Single parts alone rarely agree with the pick, since the target is
+dominated by the carried code `z`; the no-between column is the one to read
+for "was this gene selected because of the design".
 `BAE_residual_variance_share` is the per-gene version: the share of a gene's
 residual variance that sits between the design groups, a design-free score of
 every gene, not only the selected ones.
@@ -351,12 +356,12 @@ on 94% of the steps, the strata part a marker gene on every step, and `shared`
 stayed below 0.002 of any gene's residual variance.
 
 ```python
-plot_selection_trace(adata, dims=[0], decided_by="within")          # hollow marker: within alone would have picked another gene
-plot_selection_paths(adata, dims=[0], decided_by="between_disease")
+plot_selection_trace(adata, dims=[0])                               # hollow marker: without the design variance, another gene
+plot_selection_paths(adata, dims=[0], decided_by="between_disease")  # or against any single part
 ```
 
-`decided_by` names the part to flag against and defaults to `no_design` when a
-design term is on, else `within`.
+`decided_by` names the counterfactual to flag against and defaults to
+`no_design` when a design term is on, else `no_between`.
 
 ## Cost
 

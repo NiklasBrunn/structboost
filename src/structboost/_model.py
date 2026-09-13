@@ -1424,13 +1424,17 @@ class BAE(nn.Module):
             decompose=decompose,
         )
         targets, parts, shares = out if attribute else (out, {}, None)
-        # Replayed followers: the target without the design step (whose pick is
-        # the counterfactual that matters, when there is a design step) and each
-        # gradient part alone.
+        # Replayed followers: the target without the design step and the target
+        # without the design-explained residual variance (the counterfactuals
+        # that say what decided a pick, since the pick is dominated by the carried
+        # code and no gradient part alone), then each gradient part alone.
         steps = [n for n in parts if n != "carry"]
+        between = [n for n in steps if n.startswith("between_") or n == "shared"]
         followers: dict[str, np.ndarray] = {}
-        if attribute and design is not None:
+        if design is not None:
             followers["no_design"] = sum(parts.values())
+        if between:
+            followers["no_between"] = sum(v for n, v in parts.items() if n not in between)
         followers.update({n: parts[n] for n in steps})
         follower_targets = list(followers.values())
 
@@ -2031,7 +2035,9 @@ class BAE(nn.Module):
             every boosting step, the selected gene, its coefficient increment
             split the same way, the norms of the target parts, and the gene that
             would have been selected at that step *without* the design step
-            (``counterfactual_gene["no_design"]``) or by the reconstruction
+            (``counterfactual_gene["no_design"]``, or ``["no_between"]`` for the
+            target without the design-explained residual variance under
+            ``decompose_key``) or by the reconstruction
             gradient alone (``["recon"]``), given the genes already entered. The
             split is exact because boosting is linear in its target once the
             selection path is fixed.

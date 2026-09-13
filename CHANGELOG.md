@@ -127,7 +127,9 @@ tests with three extra followers had not exposed. The trace then records, for
 every boosting step, the pick each part alone would have made and the winner's
 rank under it; `varm["BAE_encoder_weights_<part>"]` hold the weight parts and
 `varm["BAE_residual_variance_share"]` splits every gene's residual sum of squares
-the same way, a design-free score of every gene, selected or not. On the planted
+the same way, a design-free score of every gene, selected or not. The trace's
+`no_between` column is the analogue of `no_design`: the pick the fit would have
+made without the design-explained residual variance. On the planted
 data of the previous paragraphs, read through `decompose_key="cond"`, the plain
 fit selected 0, 1 and 10 of the ten condition genes over three seeds, and on
 every boosting step the between-condition part alone would have picked one of
@@ -161,7 +163,8 @@ none of the other's; `design_lambda={"sex": 0}` switched the sex block off
 
 `plot_selection_trace` and `plot_selection_paths` gain `decided_by`, the part
 whose counterfactual the markers flag against, defaulting to `no_design` when a
-design term is on and to `within` otherwise; every part has a fixed colour.
+design term is on and to `no_between` — the target without the design-explained
+residual variance — otherwise; every part has a fixed colour.
 
 `allboost` gains `selection_from` (path replay: a target that follows another's
 selection path, recording its own would-be pick as the counterfactual),
