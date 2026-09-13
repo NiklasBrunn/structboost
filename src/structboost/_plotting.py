@@ -1813,3 +1813,140 @@ def plot_selection_trace(
     )
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     return fig, axes
+
+
+def plot_selection_paths(
+    adata,
+    *,
+    dims: Sequence[int] | None = None,
+    n_genes: int = 12,
+    gene_names: str | None = None,
+    figsize: tuple[float, float] | None = None,
+    dpi: int = 150,
+):
+    """Coefficient paths of the restored iteration, one line per gene, each jump
+    coloured by what decided the pick.
+
+    Reads ``adata.uns["bae"]["selection_trace"]`` (written by
+    :meth:`structboost.BAE.fit` with a ``design_key``) and rebuilds each selected
+    gene's coefficient path over the boosting steps from the recorded increments.
+    A jump is drawn in the reconstruction colour when the target *without* the
+    design step would have selected the same gene at that step, and in the
+    design colour when it would have selected another gene, so the design term
+    decided the pick. Between its jumps a gene's line is flat and faint. The
+    paths are exact for every non-mandatory gene: the increments sum to the
+    fitted coefficient.
+
+    Parameters
+    ----------
+    adata
+        Fitted AnnData carrying ``uns["bae"]["selection_trace"]``.
+    dims
+        Latent dimensions to draw, one axis each; default all.
+    n_genes
+        Genes per dimension, the largest final coefficients first.
+    gene_names
+        ``adata.var`` column to label genes by; default ``var_names``.
+    figsize, dpi
+        Figure size (default scales with the number of dimensions) and resolution.
+
+    Returns
+    -------
+    fig, axes
+        The figure and its ``(n_dims,)`` array of axes.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection
+    from matplotlib.lines import Line2D
+
+    trace = adata.uns.get("bae", {}).get("selection_trace")
+    if trace is None:
+        raise KeyError(
+            "adata.uns['bae']['selection_trace'] not found; it is written by "
+            "BAE.fit(design_key=...)"
+        )
+    gene = np.asarray(trace["gene"])
+    delta = np.asarray(trace["delta"]["total"])
+    decided = np.asarray(trace["counterfactual_gene"]["no_design"]) != gene
+    latent_dim, stepno = gene.shape
+    dims = list(range(latent_dim)) if dims is None else list(dims)
+    if any(d < 0 or d >= latent_dim for d in dims):
+        raise ValueError(f"dims out of range for a {latent_dim}-dimensional code: {dims}")
+    names = (
+        np.asarray(adata.var[gene_names], dtype=str)
+        if gene_names
+        else np.asarray(adata.var_names, dtype=str)
+    )
+
+    fig, axes = plt.subplots(
+        len(dims),
+        1,
+        figsize=figsize or (max(6.5, 0.26 * stepno + 1.5), 2.6 * len(dims) + 0.8),
+        dpi=dpi,
+        squeeze=False,
+        sharex=True,
+    )
+    axes = axes[:, 0]
+    for ax, dim in zip(axes, dims, strict=True):
+        picks, inc = gene[dim], delta[dim]
+        selected = np.unique(picks[picks >= 0])
+        paths = np.zeros((selected.size, stepno + 1))
+        for i, g in enumerate(selected):
+            paths[i, 1:] = np.cumsum(np.where(picks == g, inc, 0.0))
+        order = np.argsort(-np.abs(paths[:, -1]))[:n_genes]
+        segments, colors, widths = [], [], []
+        for i in order:
+            g = selected[i]
+            for s in range(stepno):
+                if picks[s] < 0:
+                    break
+                segments.append([(s, paths[i, s]), (s + 1, paths[i, s + 1])])
+                if picks[s] == g:
+                    colors.append(
+                        _PART_COLORS["design"] if decided[dim, s] else _PART_COLORS["recon"]
+                    )
+                    widths.append(2.4)
+                else:
+                    colors.append(_FAINT)
+                    widths.append(0.8)
+        ax.add_collection(LineCollection(segments, colors=colors, linewidths=widths, zorder=2))
+        ax.autoscale_view()
+        ax.set_xlim(0, stepno + 0.5)
+        # End labels, spread apart where paths finish at similar values: sorted,
+        # then each pushed above its predecessor by a minimum gap, with a faint
+        # leader back to the path's true end.
+        finals = paths[order, -1]
+        lo, hi = ax.get_ylim()
+        gap = (hi - lo) / max(len(order) * 1.15, 1)
+        rank = np.argsort(finals)
+        placed = finals[rank].astype(float)
+        for j in range(1, placed.size):
+            placed[j] = max(placed[j], placed[j - 1] + gap)
+        placed -= max(0.0, placed[-1] - hi) if placed.size else 0.0
+        for j, i in zip(rank, order[rank], strict=True):
+            final, y = paths[i, -1], placed[j]
+            if abs(y - final) > 1e-12:
+                ax.plot([stepno, stepno + 0.5], [final, y], color=_FAINT, lw=0.6, zorder=1)
+            ax.annotate(
+                _elide(names[selected[i]], 14),
+                (stepno + 0.5, y),
+                xytext=(3, 0),
+                textcoords="offset points",
+                fontsize=_TICK - 1,
+                va="center",
+                color=_POS if final >= 0 else _NEG,
+                annotation_clip=False,
+            )
+        _zero(ax, "y")
+        ax.set_title(f"dim {dim}", fontsize=_TITLE, loc="left", color=_INK)
+        ax.set_ylabel("coefficient", fontsize=_LABEL, color=_MUTED)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.tick_params(color=_MUTED, labelsize=_TICK, labelcolor=_MUTED, length=3)
+    axes[-1].set_xlabel("boosting step", fontsize=_LABEL, color=_MUTED)
+    handles = [
+        Line2D([], [], color=_PART_COLORS["recon"], lw=2.4, label="pick made on both objectives"),
+        Line2D([], [], color=_PART_COLORS["design"], lw=2.4, label="design step decided the pick"),
+    ]
+    fig.legend(handles=handles, loc="upper center", ncol=2, frameon=False, fontsize=_TICK)
+    fig.tight_layout(rect=(0, 0, 0.92, 0.94))
+    return fig, axes

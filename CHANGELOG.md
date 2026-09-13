@@ -101,8 +101,10 @@ separates conditions inside every cell type instead of separating cell types
 whose composition differs between conditions. `track_selection_path=True` logs
 the selected gene and increment at every iteration.
 
-**New `"attribution"` panel in `plot_latent_dimensions` and new
-`plot_selection_trace`.** The panel draws each top gene's weight by part, side
+**New `"attribution"` panel in `plot_latent_dimensions`, new
+`plot_selection_trace` and `plot_selection_paths`.** The last draws the classic
+per-gene coefficient paths of the restored iteration with every jump coloured
+by whether the design step decided that pick. The panel draws each top gene's weight by part, side
 by side rather than stacked since the parts can have opposite signs; the trace
 plot unrolls a dimension's boosting steps in time, with a hollow marker where
 the design step decided the pick.

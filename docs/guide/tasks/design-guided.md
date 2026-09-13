@@ -245,6 +245,7 @@ from structboost import plot_latent_dimensions, plot_selection_trace
 
 plot_latent_dimensions(adata, dims=[0], panels=("scores", "attribution", "groups"), group_by="condition")
 plot_selection_trace(adata, dims=[0])      # hollow marker: the design step decided this pick
+plot_selection_paths(adata, dims=[0])      # one line per gene, each jump coloured by what decided it
 ```
 
 The per-step increments of a dimension sum to its coefficients, so the trace plot

@@ -119,6 +119,7 @@ Require the ``[plot]`` extra.
    structboost.plot_dimension_gene_umaps
    structboost.plot_dimension_correlation
    structboost.plot_selection_trace
+   structboost.plot_selection_paths
    structboost.gene_variance_shares
    structboost.palette_audit
 
