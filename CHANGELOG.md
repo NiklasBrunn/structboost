@@ -127,7 +127,16 @@ tests with three extra followers had not exposed. The trace then records, for
 every boosting step, the pick each part alone would have made and the winner's
 rank under it; `varm["BAE_encoder_weights_<part>"]` hold the weight parts and
 `varm["BAE_residual_variance_share"]` splits every gene's residual sum of squares
-the same way, a design-free score of every gene, selected or not. TODO_DECOMP_CL
+the same way, a design-free score of every gene, selected or not. On the planted
+data of the previous paragraphs, read through `decompose_key="cond"`, the plain
+fit selected 0, 1 and 10 of the ten condition genes over three seeds, and on
+every boosting step the between-condition part alone would have picked one of
+them while the within part never would have; the condition genes carry 15% of
+their residual variance between conditions against 0.1% for the others, and the
+between part's norm is 4% of the total target's — the signal is there and too
+small to win. With a second orthogonal variable and strata, the between-sex
+part picked a sex gene on 94% of the steps, the strata part a marker on every
+step, and `shared` stayed below 0.002 of any gene's residual variance.
 It decomposes the residual, not the data, is exact for the squared loss only,
 and `shared` is large when variables are confounded, which is information about
 the design rather than a defect of the split.
@@ -144,7 +153,10 @@ confounded variables share is filtered out of both blocks. This changes what a
 multi-variable `design_key` did before this entry's release (one joint
 projection, the orthogonalization deciding which dimension carried what), and
 the intercept is now removed from the kept part too, which is zero on centred
-data. On the planted data with a second orthogonal variable, TODO_BLOCKS_CL
+data. On the planted data with a second orthogonal variable, the two blocks reached
+R² 0.72 each and recovered their own ten genes with precision and recall 1.0 and
+none of the other's; `design_lambda={"sex": 0}` switched the sex block off
+(R² 0.002, nothing selected) with the condition block unchanged.
 
 
 `plot_selection_trace` and `plot_selection_paths` gain `decided_by`, the part

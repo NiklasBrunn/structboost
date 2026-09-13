@@ -278,7 +278,11 @@ tell apart from another variable's. On the Wilk cohort, where every COVID-19
 donor is male and two of the six healthy donors are female, sex and disease
 share most of their between-group variance, and `design_key={"disease": [0],
 "sex": [1]}` gives each block only the part the other cannot explain
-(TODO_BLOCKS).
+(see below). On the same planted data with the second variable,
+`design_key=["cond", "sex"]` gave two blocks of R² 0.72 that each recovered
+their own ten genes with precision and recall 1.0 and none of the other's, and
+`design_lambda={"sex": 0}` switched the sex block off (R² 0.002, nothing
+selected) while the condition block came out unchanged.
 
 ## Where does a gene's score come from? The decomposition
 
@@ -332,7 +336,19 @@ plain fit's pick differs from it, reconstruction went elsewhere, and
 residual variance that sits between the design groups, a design-free score of
 every gene, not only the selected ones.
 
-TODO_DECOMP_NUMBERS
+On the planted data of the sections above (1,000 cells, 500 genes, three cell
+types, ten condition genes shifted by one standard deviation, three seeds,
+150 iterations, `latent_dim=6`), read through `decompose_key="cond"`, the plain
+fit selected 0, 1 and 10 of the ten condition genes, and on *every* boosting
+step of every seed the between-condition part alone would have picked one of
+them, while the within part never would have. The condition genes carry 15% of
+their residual variance between the conditions against 0.1% for the other
+genes, and the between part's norm is 4% of the total target's: the signal is
+there, concentrated on the right genes, and too small to win on its own. That
+is the number the design term is up against. With a second, orthogonal planted
+variable and `decompose_within="stage"`, the between-sex part picked a sex gene
+on 94% of the steps, the strata part a marker gene on every step, and `shared`
+stayed below 0.002 of any gene's residual variance.
 
 ```python
 plot_selection_trace(adata, dims=[0], decided_by="within")          # hollow marker: within alone would have picked another gene
