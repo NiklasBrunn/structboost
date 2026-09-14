@@ -198,7 +198,15 @@ programme with pairwise correlation below 0.01. That needs the default
 orthogonalization: the filter undoes it inside a block, so a second pass runs
 inside each block after the filter, staying in the kept subspace; without
 orthogonalization two of the three dimensions converged on the same
-programme. Check the result with
+programme. On the Wilk cohort (15 dimensions, 1,000 iterations)
+`design_key={"disease": [0, 1, 2], "sex": [3]}` with cell-type strata gave three
+disease profiles, R² 0.34, 0.21 and 0.29 with pairwise correlation at most
+0.27: a classical-monocyte programme (CLU, FCGR1A, IFI27, TGFBI, TNFAIP2,
+TMEM176B; AUROC 0.97 within CD14 monocytes, near 0.5 in lymphocytes), a
+complement and non-classical-monocyte programme (C1QA, C1QB, C1QC, MSR1, SPIC;
+0.85 within non-classical monocytes, 0.89 within neutrophils) and a
+pan-lymphoid interferon and cytotoxic programme (XAF1, IFI44L, MX1, IFIT3, GNLY,
+GZMA; 0.83 to 0.89 across T, NK and B cells). Check the result with
 
 ```python
 adata.uns["bae"]["latent_design_r2_per_dim"]   # near one on the constrained dimensions is the goal
