@@ -188,7 +188,17 @@ depends on the question.
 A variable's block defaults to the next `min(q, latent_dim)` dimensions, `q` being the
 number of encoded design columns (levels minus one per categorical column). The
 design subspace has dimension `q`, so more constrained dimensions than that
-cannot all be design-explained and mutually orthogonal. Check the result with
+cannot all be design-explained and mutually orthogonal, and `fit` warns when a
+block is wider than the rank of what it keeps. With `design_within` that rank
+is the number of strata in which the variable varies, so a wider block is well
+posed: `design_key={"disease": [0, 1, 2]}, design_within="cell_type"` asks for
+three *cell-type profiles* of the disease response. On planted data with one
+condition programme per cell type, the three dimensions each took one
+programme with pairwise correlation below 0.01. That needs the default
+orthogonalization: the filter undoes it inside a block, so a second pass runs
+inside each block after the filter, staying in the kept subspace; without
+orthogonalization two of the three dimensions converged on the same
+programme. Check the result with
 
 ```python
 adata.uns["bae"]["latent_design_r2_per_dim"]   # near one on the constrained dimensions is the goal

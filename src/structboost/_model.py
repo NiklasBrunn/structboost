@@ -1540,6 +1540,24 @@ class BAE(nn.Module):
                 kept = self._design_keep(design[joint], design[joint - {variable}], block)
                 factor = self.config.target_optim_lr * self._design_lambdas[variable]
                 targets[:, dims] = (block - factor * (block - kept)).astype(targets.dtype)
+                if dims.size > 1 and self.config.disentanglement == "orthogonal":
+                    # The filter undoes the orthogonalization inside a block, and a
+                    # block's dimensions would converge on the kept subspace's
+                    # dominant direction; a second pass inside the block keeps them
+                    # apart and stays in that subspace, which is closed under
+                    # linear combinations, so the constraint remains exact.
+                    if attribute:
+                        targets[:, dims], mapped = disentangle_boosting_targets(
+                            targets[:, dims],
+                            alpha=alpha,
+                            components=[f[:, dims] for f in follower_targets],
+                        )
+                        for follower, part in zip(follower_targets, mapped, strict=True):
+                            follower[:, dims] = part
+                    else:
+                        targets[:, dims] = disentangle_boosting_targets(
+                            targets[:, dims], alpha=alpha
+                        )
             if attribute:
                 # The design part is replayed too, for its scores and counterfactual;
                 # its *weights* are still taken as the exact remainder below.
@@ -2557,6 +2575,18 @@ class BAE(nn.Module):
             self._design_blocks, self._design_lambdas = blocks, lambdas
             self._design_within = resolve_within(design_within, columns, "design_within")
             design = self._design_subspaces(adata, columns, self._design_within)
+            joint = frozenset(columns)
+            for v, dims in blocks.items():
+                rank = design[joint].shape[1] - design[joint - {v}].shape[1]
+                if dims.size > rank:
+                    warnings.warn(
+                        f"the design_key block for {v!r} has {dims.size} dimensions but what it "
+                        f"keeps has rank {rank}, so beyond {rank} its dimensions can only repeat "
+                        "one another. Use fewer dimensions, or design_within for a per-stratum "
+                        "effect, whose rank is the number of strata with more than one level.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
 
         if decompose_key is not None:
             self._decompose_columns = resolve_columns(decompose_key, "decompose_key")

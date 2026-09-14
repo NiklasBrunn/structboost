@@ -152,11 +152,9 @@ def _planted(seed=0, n=600, p=80):
 def _fit(adata, **kwargs):
     from structboost import BAE
 
-    config = kwargs.pop("config", {})
-    model = BAE(
-        adata.n_vars,
-        BAEConfig(latent_dim=3, max_iterations=25, seed=0, boosting_stepno=10, **config),
-    )
+    config = {"latent_dim": 3, "max_iterations": 25, "seed": 0, "boosting_stepno": 10}
+    config.update(kwargs.pop("config", {}))
+    model = BAE(adata.n_vars, BAEConfig(**config))
     model.fit(adata, verbose=False, **kwargs)
     return model
 
@@ -653,6 +651,50 @@ def test_design_blocks_list_and_dict_forms_and_per_variable_lambda():
         _fit(adata, design_key=["cond", "sex"], config=dict(design_lambda={"sex": 1.5}))
     with pytest.raises(ValueError, match="design_lambda"):
         BAEConfig(design_lambda={"cond": -1.0})
+
+
+def test_wide_block_fills_its_rank_and_warns_beyond_it():
+    """A block wider than one for a binary variable: without strata the kept
+    subspace has rank one and the fit warns; with strata and cell-type-specific
+    condition programmes, the block's dimensions each take one programme, kept
+    apart by the orthogonalization pass inside the block."""
+    _require_bae()
+    import anndata as ad
+    import pandas as pd
+
+    rng = np.random.default_rng(5)
+    n, p = 900, 80
+    X = rng.standard_normal((n, p)).astype(np.float32)
+    cond, ct = np.arange(n) % 2, np.arange(n) // 300
+    for s, genes in enumerate((slice(0, 8), slice(8, 16), slice(16, 24))):
+        X[ct == s, genes] += 1.5 * (cond[ct == s, None] - 0.5)
+    X[:, 30:40] += 1.5 * (ct[:, None] == 1)
+    X = ((X - X.mean(0)) / X.std(0)).astype(np.float32)
+    adata = ad.AnnData(X)
+    adata.var_names = [f"g{i}" for i in range(p)]
+    adata.obs["cond"] = pd.Categorical(np.where(cond == 1, "ko", "wt"))
+    adata.obs["ct"] = pd.Categorical(ct.astype(str))
+
+    with pytest.warns(UserWarning, match="rank 1"):
+        _fit(adata, design_key={"cond": [0, 1, 2]}, config=dict(latent_dim=4))
+    model = _fit(
+        adata,
+        design_key={"cond": [0, 1, 2]},
+        design_within="ct",
+        config=dict(latent_dim=5, max_iterations=40),
+    )
+    W = adata.varm["BAE_encoder_weights"]
+    programmes = [set(range(8 * s, 8 * s + 8)) for s in range(3)]
+    taken = [
+        max(range(3), key=lambda s: len(set(np.flatnonzero(W[:, d])) & programmes[s]))
+        for d in range(3)
+    ]
+    assert sorted(taken) == [0, 1, 2]
+    corr = np.abs(np.corrcoef(adata.obsm["X_bae"][:, :3].T))
+    assert corr[np.triu_indices(3, 1)].max() < 0.3
+    # The exact split survives the pass inside the block.
+    np.testing.assert_allclose(_parts_sum(adata), W, atol=1e-6)
+    assert model._design_blocks["cond"].tolist() == [0, 1, 2]
 
 
 def test_design_key_and_decompose_key_combine():

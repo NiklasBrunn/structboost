@@ -166,7 +166,13 @@ the intercept is now removed from the kept part too, which is zero on centred
 data. On the planted data with a second orthogonal variable, the two blocks reached
 R² 0.72 each and recovered their own ten genes with precision and recall 1.0 and
 none of the other's; `design_lambda={"sex": 0}` switched the sex block off
-(R² 0.002, nothing selected) with the condition block unchanged. On the Wilk
+(R² 0.002, nothing selected) with the condition block unchanged. A block wider
+than one gets a second orthogonalization pass inside the block after the filter,
+since the filter undoes the first: on planted data with one condition programme
+per cell type, `design_key={"cond": [0, 1, 2]}` with strata took one programme
+per dimension (pairwise correlation below 0.01) where it had converged on one,
+and `fit` warns when a block is wider than the rank of what it keeps, one for a
+binary variable without strata. On the Wilk
 cohort, where every COVID-19 donor is male, `design_key={"disease": [0], "sex":
 [1]}` moved XIST from the disease block, whose top gene it had been, to the top
 of the sex block, with the disease dimension alone still at within-cell-type
