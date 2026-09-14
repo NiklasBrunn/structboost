@@ -172,7 +172,11 @@ since the filter undoes the first: on planted data with one condition programme
 per cell type, `design_key={"cond": [0, 1, 2]}` with strata took one programme
 per dimension (pairwise correlation below 0.01) where it had converged on one,
 and `fit` warns when a block is wider than the rank of what it keeps, one for a
-binary variable without strata. On the Wilk
+binary variable without strata. A three-dimension disease block inside cell
+types on the Wilk cohort gave three profiles with pairwise correlation at most
+0.27: classical monocytes (FCGR1A, IFI27, TNFAIP2; AUROC 0.97 within CD14
+monocytes), complement and non-classical monocytes (C1QA/B/C, MSR1) and a
+pan-lymphoid interferon response (MX1, IFIT3, GNLY, GZMA). On the Wilk
 cohort, where every COVID-19 donor is male, `design_key={"disease": [0], "sex":
 [1]}` moved XIST from the disease block, whose top gene it had been, to the top
 of the sex block, with the disease dimension alone still at within-cell-type
