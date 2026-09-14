@@ -131,7 +131,9 @@ the same way, a design-free score of every gene, selected or not, computed from
 the fitted model's residual by the new `BAE.residual_variance_shares`, whose
 `per_stratum=True` takes the split inside every stratum — which cell types carry
 a variable's effect — with the pooled column the exact residual-weighted sum of
-the per-stratum ones. TODO_PER_STRATUM_CL The trace's
+the per-stratum ones (4 s on the Wilk cohort; it placed C1QA/B/C in the
+non-classical monocytes and NK cells, SOCS3 in monocytes and CD4 T cells, GNLY in
+effector CD8 T cells). The trace's
 `no_between` column is the analogue of `no_design`: the pick the fit would have
 made without the design-explained residual variance; on the planted data it
 flagged 75% of the 48 steps the plain fit spent on a condition gene against 7%

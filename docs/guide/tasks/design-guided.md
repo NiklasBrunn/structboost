@@ -356,7 +356,12 @@ from, and `residual_variance_shares(adata, per_stratum=True)` takes the same
 split inside every stratum: which cell types carry a variable's effect, gene by
 gene. The pooled `between_<v>` column is exactly the per-stratum shares
 weighted by each stratum's share of the gene's residual sum of squares, so the
-two tables cannot disagree. TODO_PER_STRATUM
+two tables cannot disagree. On Wilk it took 4 seconds on 44,116 cells and
+placed the complement genes C1QA, C1QB and C1QC in the non-classical monocytes
+and natural killer cells, SOCS3 in monocytes and naive and memory CD4 T cells,
+FCGR1A and LYZ in the monocytes, HBD and ALAS2 in erythrocytes, and GNLY almost
+entirely in effector CD8 T cells, where 18% of its residual variance is a
+disease difference against under 2% anywhere else.
 
 On the planted data of the sections above (1,000 cells, 500 genes, three cell
 types, ten condition genes shifted by one standard deviation, three seeds,
