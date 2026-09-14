@@ -926,6 +926,9 @@ class BAE(nn.Module):
             strata = pd.get_dummies(labels).to_numpy(dtype=np.float64)
 
         def basis(subset: tuple[str, ...]) -> np.ndarray:
+            # A variable constant on these cells (a stratum with one condition)
+            # spans nothing beyond the intercept and is left out.
+            subset = tuple(c for c in subset if adata.obs[c].nunique() > 1)
             if not subset:
                 return orth(strata) if strata is not None else np.full((n, 1), n**-0.5)
             design = np.asarray(
