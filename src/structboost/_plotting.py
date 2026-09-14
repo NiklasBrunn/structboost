@@ -426,6 +426,17 @@ def _part_colors(names) -> dict[str, str]:
     return colors
 
 
+_COUNTERFACTUAL_LABELS = {
+    "no_design": "without the design step",
+    "no_between": "without the design-explained variance",
+}
+
+
+def _counterfactual_label(decided_by: str) -> str:
+    """How a counterfactual reads in a legend: a target without something, or a part alone."""
+    return _COUNTERFACTUAL_LABELS.get(decided_by, f"{decided_by} alone")
+
+
 def _decided_against(trace, decided_by: str | None) -> str:
     """Which counterfactual flags a pick as decided: the target without the design
     step, else without the design-explained residual variance, else the first."""
@@ -1840,7 +1851,7 @@ def plot_selection_trace(
             ls="",
             markerfacecolor="white",
             markeredgecolor=_INK,
-            label=f"{decided_by} alone would have picked another gene",
+            label=f"{_counterfactual_label(decided_by)}, another gene would have been picked",
         )
     ]
     fig.legend(
@@ -1990,9 +2001,15 @@ def plot_selection_paths(
     axes[-1].set_xlabel("boosting step", fontsize=_LABEL, color=_MUTED)
     handles = [
         Line2D(
-            [], [], color=_PART_COLORS["recon"], lw=2.4, label=f"{decided_by} alone picks it too"
+            [],
+            [],
+            color=_PART_COLORS["recon"],
+            lw=2.4,
+            label=f"{_counterfactual_label(decided_by)}: same pick",
         ),
-        Line2D([], [], color=accent, lw=2.4, label=f"{decided_by} alone would pick another gene"),
+        Line2D(
+            [], [], color=accent, lw=2.4, label=f"{_counterfactual_label(decided_by)}: another gene"
+        ),
     ]
     fig.legend(handles=handles, loc="upper center", ncol=2, frameon=False, fontsize=_TICK)
     fig.tight_layout(rect=(0, 0, 0.92, 0.94))
