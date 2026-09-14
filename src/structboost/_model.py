@@ -908,7 +908,8 @@ class BAE(nn.Module):
         interaction, so ``P_S - P_∅`` is the design effect *inside* the strata with
         the stratum main effect, typically cell type, removed rather than kept.
         Bases come from a rank-revealing SVD because empty stratum-design cells
-        make the interaction design rank deficient. Every subset is nested in
+        make the interaction design rank deficient, and a design level can be
+        absent from a stratum's cells. Every subset is nested in
         ``J``, which is what makes ``P_J - P_{J\\v}`` a projector and the parts of
         the decomposition additive.
         """
@@ -931,7 +932,7 @@ class BAE(nn.Module):
                 encode_obs_covariates(adata, list(subset)).encoded, dtype=np.float64
             )
             if strata is None:
-                return np.linalg.qr(np.column_stack([np.ones(n), design]))[0]
+                return orth(np.column_stack([np.ones(n), design]))
             return orth(
                 np.hstack([strata, *(strata * design[:, [j]] for j in range(design.shape[1]))])
             )
@@ -944,6 +945,97 @@ class BAE(nn.Module):
         """The design-explained part of the columns of ``T`` : ``P_keep T - P_drop T``."""
         kept = Q_keep @ (Q_keep.T @ T)
         return kept if Q_drop is None else kept - Q_drop @ (Q_drop.T @ T)
+
+    @staticmethod
+    def _decompose_parts(columns: list[str], stratified: bool) -> dict[str, dict[frozenset, float]]:
+        """The parts of the decomposition as linear combinations of the subsets' ``G_S``.
+
+        ``between_<v> = G_J - G_{J\\v}``, what ``v`` explains beyond the other
+        variables; ``shared``, the rest of ``G_J - G_∅`` once every unique part is
+        taken out (several variables only); ``strata`` or ``mean``, ``G_∅``. The
+        remaining part, ``within = L - G_J``, is not a combination of the ``G_S``
+        and is formed by the caller.
+        """
+        joint, empty = frozenset(columns), frozenset()
+        parts = {f"between_{v}": {joint: 1.0, joint - {v}: -1.0} for v in columns}
+        if len(columns) > 1:
+            parts["shared"] = {joint: 1.0 - len(columns), empty: -1.0}
+            parts["shared"].update({joint - {v}: 1.0 for v in columns})
+        parts["strata" if stratified else "mean"] = {empty: 1.0}
+        return parts
+
+    def residual_variance_shares(
+        self,
+        adata: AnnData,
+        *,
+        per_stratum: bool = False,
+        layer: str | None | _FitLayer = FIT_LAYER,
+    ):
+        """Where each gene's residual variance sits with respect to the design variables.
+
+        The fitted model's residual ``R = D(E(X)) - X`` is split per gene into the
+        sums of squares the ``decompose_key`` variables explain — ``between_<v>``
+        for each variable beyond the others, ``shared`` for several, ``strata``
+        (the ``decompose_within`` main effect) or ``mean`` — and ``within``, the
+        rest, each as a share of the gene's residual sum of squares. This is a
+        design-free score of every gene, selected or not; :meth:`fit` stores it as
+        ``varm["BAE_residual_variance_share"]``.
+
+        With ``per_stratum=True`` the same split is taken inside every stratum
+        separately, answering which cell types carry a variable's effect: a
+        DataFrame with ``(part, stratum)`` columns, where ``mean`` is the
+        stratum's own mean. The pooled ``between_<v>`` share is the sum of the
+        per-stratum shares weighted by each stratum's share of the gene's
+        residual sum of squares.
+
+        Parameters
+        ----------
+        adata
+            The data the model was fitted on, or any data with the same genes
+            and the design and strata columns.
+        per_stratum
+            Split inside every stratum rather than pooled. Requires
+            ``decompose_within``.
+        layer
+            Expression layer, as for :meth:`reconstruct`.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Genes by parts, or genes by ``(part, stratum)`` with ``per_stratum``.
+        """
+        import pandas as pd
+
+        columns, within = self._decompose_columns, self._decompose_within
+        if columns is None:
+            raise ValueError("residual_variance_shares needs a model fitted with a decompose_key")
+        if per_stratum and within is None:
+            raise ValueError("per_stratum needs a model fitted with decompose_within")
+        X = _expression_matrix(adata, self._resolve_layer(layer))
+        R = self.reconstruct(adata, layer=layer) - (
+            X.toarray() if sp.issparse(X) else np.asarray(X)
+        )
+        R = R.astype(np.float64)
+
+        def shares(cells, stratified: bool):
+            bases = self._design_subspaces(adata[cells], columns, within if stratified else None)
+            ss = {key: ((Q.T @ R[cells]) ** 2).sum(axis=0) for key, Q in bases.items()}
+            r_sq = (R[cells] ** 2).sum(axis=0)
+            parts = self._decompose_parts(columns, stratified)
+            cols = {n: sum(c * ss[k] for k, c in combo.items()) for n, combo in parts.items()}
+            cols["within"] = r_sq - ss[frozenset(columns)]
+            tiny = np.finfo(np.float64).tiny
+            return pd.DataFrame(
+                {n: c / (r_sq + tiny) for n, c in cols.items()}, index=adata.var_names
+            )
+
+        if not per_stratum:
+            return shares(slice(None), within is not None)
+        labels = adata.obs[list(within)].astype(str).agg("|".join, axis=1).to_numpy()
+        tables = {s: shares(labels == s, False) for s in np.unique(labels)}
+        order = [*self._decompose_parts(columns, False), "within"]
+        columns_index = pd.MultiIndex.from_product([order, list(tables)], names=["part", "stratum"])
+        return pd.concat(tables, axis=1).swaplevel(axis=1).reindex(columns=columns_index)
 
     @staticmethod
     def _design_r2(Q_keep: np.ndarray, Q_drop: np.ndarray | None, Z: np.ndarray) -> np.ndarray:
@@ -1161,7 +1253,7 @@ class BAE(nn.Module):
         z_override: torch.Tensor | None = None,
         components: bool = False,
         decompose: dict[frozenset, np.ndarray] | None = None,
-    ) -> np.ndarray | tuple[np.ndarray, dict[str, np.ndarray], dict[str, np.ndarray] | None]:
+    ) -> np.ndarray | tuple[np.ndarray, dict[str, np.ndarray]]:
         """Compute boosting targets via single gradient step from current z.
 
         Computes targets = z_current - lr * ∂L_target/∂z, representing one step of
@@ -1229,14 +1321,12 @@ class BAE(nn.Module):
             suppression and large when variables are confounded), ``mean`` or
             ``strata`` (``G_∅``) and ``within = L - G_J``. One backward pass per
             subset. The total gradient is still the one the plain fit takes, so
-            the fit is unchanged. Also returns each gene's residual sum of
-            squares split the same way, as shares.
+            the fit is unchanged.
 
         Returns
         -------
         Target latent codes as numpy array of shape (n_cells, latent_dim); with
-        ``components``, also the parts dict and the per-gene residual shares
-        (``None`` without ``decompose``).
+        ``components``, also the parts dict.
         """
         self.decoder.eval()
         # Get current encoder output (detached) and create leaf tensor for grad
@@ -1279,7 +1369,6 @@ class BAE(nn.Module):
         (z_grad,) = torch.autograd.grad(total, z, retain_graph=need_graph)
 
         grads: dict[str, torch.Tensor] = {}
-        shares: dict[str, np.ndarray] | None = None
         if components:
             recon_grad = z_grad
             if penalty is not None:
@@ -1293,38 +1382,26 @@ class BAE(nn.Module):
                 grads["recon"] = recon_grad
             else:
                 # One backward pass per subset S for G_S = ||Q_Sᵀ R||² / p; every
-                # part is the same linear combination of the G_S gradients and of
-                # the per-gene explained sums of squares, from one set of projections.
+                # part is a linear combination of them (`_decompose_parts`).
                 columns = self._decompose_columns
-                joint, empty = frozenset(columns), frozenset()
-                combos = {f"between_{v}": {joint: 1.0, joint - {v}: -1.0} for v in columns}
-                if len(columns) > 1:
-                    combos["shared"] = {joint: 1.0 - len(columns), empty: -1.0}
-                    combos["shared"].update({joint - {v}: 1.0 for v in columns})
-                combos["strata" if self._decompose_within is not None else "mean"] = {empty: 1.0}
-
-                def combine(table: dict) -> dict:
-                    return {
-                        name: sum(c * table[key] for key, c in combo.items())
-                        for name, combo in combos.items()
-                    }
-
+                parts = self._decompose_parts(columns, self._decompose_within is not None)
                 R = x_recon - X
-                proj = {
-                    key: torch.as_tensor(Q, dtype=X.dtype, device=X.device).T @ R
+                explained = {
+                    key: torch.autograd.grad(
+                        ((torch.as_tensor(Q, dtype=X.dtype, device=X.device).T @ R) ** 2).sum()
+                        / X.shape[1],
+                        z,
+                        retain_graph=True,
+                    )[0]
                     for key, Q in decompose.items()
                 }
-                explained = {
-                    key: torch.autograd.grad((P**2).sum() / X.shape[1], z, retain_graph=True)[0]
-                    for key, P in proj.items()
-                }
-                grads.update(combine(explained))
-                grads["within"] = recon_grad - explained[joint]
-                with torch.no_grad():
-                    ss = {key: (P**2).sum(dim=0) for key, P in proj.items()}
-                    r_sq = (R**2).sum(dim=0)
-                    cols = {**combine(ss), "within": r_sq - ss[joint]}
-                    shares = {n: (c / r_sq.clamp_min(1e-30)).cpu().numpy() for n, c in cols.items()}
+                grads.update(
+                    {
+                        n: sum(c * explained[k] for k, c in combo.items())
+                        for n, combo in parts.items()
+                    }
+                )
+                grads["within"] = recon_grad - explained[frozenset(columns)]
 
         # Target = current z moved in negative gradient direction
         with torch.no_grad():
@@ -1338,7 +1415,7 @@ class BAE(nn.Module):
             if components:
                 parts = {"carry": z.detach().cpu().numpy()}
                 parts.update({name: (-lr * g).cpu().numpy() for name, g in grads.items()})
-                return targets.cpu().numpy(), parts, shares
+                return targets.cpu().numpy(), parts
 
         return targets.cpu().numpy()
 
@@ -1427,7 +1504,7 @@ class BAE(nn.Module):
             components=attribute,
             decompose=decompose,
         )
-        targets, parts, shares = out if attribute else (out, {}, None)
+        targets, parts = out if attribute else (out, {})
         # Replayed followers: the target without the design step and the target
         # without the design-explained residual variance (the counterfactuals
         # that say what decided a pick, since the pick is dominated by the carried
@@ -1574,8 +1651,6 @@ class BAE(nn.Module):
             "gain": gain,
             "target_norm": norm,
         }
-        if shares is not None:
-            trace["residual_share"] = shares
         return betamat[:k], targets, new_parts, trace
 
     def _boost_inputs(
@@ -2082,8 +2157,9 @@ class BAE(nn.Module):
             with one it splits the reconstruction part of that fit. The weight
             parts land in ``varm["BAE_encoder_weights_<part>"]`` and each gene's
             residual sum of squares is split the same way in
-            ``varm["BAE_residual_variance_share"]``. Costs one extra backward pass
-            per subset of the variables.
+            ``varm["BAE_residual_variance_share"]`` (:meth:`residual_variance_shares`,
+            which can also take the split inside every stratum). Costs one extra
+            backward pass per subset of the variables.
         decompose_within
             Strata for the decomposition, as ``design_within`` for the design
             term: the between parts become the design effect inside each stratum
@@ -3816,13 +3892,8 @@ class BAE(nn.Module):
                 adata.varm[f"BAE_encoder_weights_{name}"] = np.ascontiguousarray(W_part.T)
             uns_dict["attribution_parts"] = list(self._encoder_components)
             trace = copy.deepcopy(self._selection_trace)
-            shares = trace.pop("residual_share", None)
-            if shares is not None:
-                import pandas as pd
-
-                adata.varm["BAE_residual_variance_share"] = pd.DataFrame(
-                    shares, index=adata.var_names
-                )
+            if self._decompose_columns is not None:
+                adata.varm["BAE_residual_variance_share"] = self.residual_variance_shares(adata)
             uns_dict["selection_trace"] = trace
 
         # Always recorded. A bare MSE is not interpretable on its own: on the

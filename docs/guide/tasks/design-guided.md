@@ -307,6 +307,7 @@ model.fit(adata, decompose_key=["disease", "sex"], decompose_within="cell_type")
 
 adata.varm["BAE_encoder_weights_between_disease"]   # + "_between_sex", "_shared", "_strata" (or "_mean"), "_within", "_carry"
 adata.varm["BAE_residual_variance_share"]           # DataFrame, one column per part: each gene's residual sum of squares, split the same way
+model.residual_variance_shares(adata, per_stratum=True)   # the same split inside every cell type: (part, cell type) columns
 adata.uns["bae"]["selection_trace"]                 # the same fields as above, keyed by these parts
 ```
 
@@ -349,7 +350,13 @@ gene, and without the between-condition variance 75% of those picks would have
 gone to another gene, against 7% of all other steps.
 `BAE_residual_variance_share` is the per-gene version: the share of a gene's
 residual variance that sits between the design groups, a design-free score of
-every gene, not only the selected ones.
+every gene, not only the selected ones. It is computed from the fitted model's
+residual, one decoder update after the target the trace parts were formed
+from, and `residual_variance_shares(adata, per_stratum=True)` takes the same
+split inside every stratum: which cell types carry a variable's effect, gene by
+gene. The pooled `between_<v>` column is exactly the per-stratum shares
+weighted by each stratum's share of the gene's residual sum of squares, so the
+two tables cannot disagree. TODO_PER_STRATUM
 
 On the planted data of the sections above (1,000 cells, 500 genes, three cell
 types, ten condition genes shifted by one standard deviation, three seeds,

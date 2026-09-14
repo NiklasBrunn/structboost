@@ -579,6 +579,37 @@ def test_decomposition_counterfactuals_find_the_planted_programmes():
     assert (trace["rank"]["between_cond"][cond_steps] < 8).all()
 
 
+def test_residual_variance_shares_per_stratum_pool_to_the_stored_table():
+    """Inside every stratum the split is the unstratified one; weighting each
+    stratum's between share by its share of the gene's residual sum of squares
+    recovers the pooled column, and the strata part is what those means explain."""
+    _require_bae()
+    adata = _planted2()
+    model = _fit(adata, decompose_key=["cond", "sex"], decompose_within="ct")
+    pooled = adata.varm["BAE_residual_variance_share"]
+    by_ct = model.residual_variance_shares(adata, per_stratum=True)
+    parts = list(by_ct.columns.get_level_values("part").unique())
+    assert parts == [c.replace("strata", "mean") for c in pooled.columns]
+    strata = by_ct.columns.get_level_values("stratum").unique()
+    assert set(strata) == {"0", "1", "2"}
+    R = (model.reconstruct(adata) - np.asarray(adata.X)).astype(np.float64)
+    labels = adata.obs["ct"].astype(str).to_numpy()
+    weight = (
+        np.column_stack([(R[labels == s] ** 2).sum(0) for s in strata]) / (R**2).sum(0)[:, None]
+    )
+    for part in ("between_cond", "between_sex", "shared"):
+        np.testing.assert_allclose(
+            (by_ct[part].to_numpy() * weight).sum(1), pooled[part].to_numpy(), atol=1e-9
+        )
+    # The condition genes carry their between share in every stratum alike.
+    assert by_ct["between_cond"].iloc[:8].min().min() > 0.05
+    np.testing.assert_allclose(by_ct.T.groupby(level="stratum").sum().T, 1.0, atol=1e-9)
+    with pytest.raises(ValueError, match="decompose_within"):
+        _fit(adata, decompose_key="cond").residual_variance_shares(adata, per_stratum=True)
+    with pytest.raises(ValueError, match="decompose_key"):
+        _fit(adata).residual_variance_shares(adata)
+
+
 def test_design_blocks_list_and_dict_forms_and_per_variable_lambda():
     _require_bae()
     from structboost._utils import latent_r2_per_dim

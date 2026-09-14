@@ -13,8 +13,8 @@ The model
 
 The Boosting Autoencoder itself and its configuration. ``BAE`` carries the whole
 fitting and inference surface: ``fit``, ``transform``, ``reconstruct``,
-``stability_selection``, ``from_reference``, ``save`` and ``load`` are all
-methods on it.
+``residual_variance_shares``, ``stability_selection``, ``from_reference``,
+``save`` and ``load`` are all methods on it.
 
 .. autosummary::
    :toctree: generated
