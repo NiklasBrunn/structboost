@@ -19,6 +19,46 @@ error next to cell type, so a plain fit rarely gives it a dimension of its own.
 `design_key` names an obs column, or several, and pulls the latent dimensions in
 its block toward it. The other dimensions stay reconstruction-only.
 
+## Diagnose first, guide second
+
+The design term changes the fit, so the question before using it is whether
+the plain fit is missing anything along the design at all. The decomposition
+answers that without changing the fit, and the order below is the one the
+tools were built for.
+
+1. **Fit plain, read the residual through the design.**
+   `model.fit(adata, decompose_key="disease", decompose_within="cell_type")`
+   is bitwise the plain fit. Sort `adata.varm["BAE_residual_variance_share"]`
+   by `between_disease`: the genes at the top are those whose *unexplained*
+   variance is a disease difference inside cell types, selected or not. If the
+   column is flat, there is nothing for a design term to find, and shuffled
+   labels give the null to compare against. A large `shared` column with a
+   second variable says the design is confounded and names the genes.
+2. **Ask where.** `model.residual_variance_shares(adata, per_stratum=True)`
+   splits the same shares by cell type. A gene the model uses and still misses
+   along disease (GNLY inside effector CD8 T cells on Wilk) and a programme it
+   never picked up (C1QA/B/C in non-classical monocytes) look the same in the
+   pooled table and different here.
+3. **Ask whether it mattered for the selection.** The trace's `no_between`
+   column says on which steps the design-explained variance decided a pick;
+   `plot_selection_trace` and `plot_selection_paths` show it per step and per
+   gene. Few flagged steps with a strong between column means the signal is
+   there and losing: the case for guidance.
+4. **Guide, and check the same readouts on the guided fit.** `design_key` with
+   the same `design_within`, one block per variable, `design_lambda` at 1
+   first. `latent_design_r2_per_dim` near one on the block, the shuffled-label
+   null alongside, and `decompose_key` passed as well so the reconstruction
+   part of the guided fit is read the same way. The between shares of the
+   genes from step 1 should drop; if they do not, the block did not take them
+   and the trace says what won instead.
+
+Two things this workflow will not tell you. A share is relative to the gene's
+own residual variance, so a gene reconstructed almost perfectly can carry a
+large share of a tiny residual; look at the residual sum of squares next to
+it for magnitude. And "unexplained" is at the restored iteration: a gene may
+have been explained earlier and lost as capacity went elsewhere, which
+`track_selection_path=True` can show and the share cannot.
+
 ## What the loss is
 
 On the constrained dimensions the fit adds
