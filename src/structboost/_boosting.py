@@ -389,7 +389,7 @@ def allboost(
         Note: the internal predictor–predictor covariance cache depends only on
         `sourcemat` and is therefore shared across targets for efficiency.
         If False, parameters persist across targets.
-    return_history : bool or "steps", default=False
+    return_history : bool or str, default=False
         If True, also return an `AllboostHistory` object containing the selected
         feature at each step, the increment it received, and the coefficient path
         (after each step). ``"steps"`` returns the same without ``beta_path``,
