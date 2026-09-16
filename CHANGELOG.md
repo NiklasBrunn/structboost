@@ -192,7 +192,10 @@ the three lineages at 83%, 90% and 62% purity), with the maturation dimension
 again unchanged. The authors' LIGER factor 6 is the same granule maturation axis
 (correlation 0.88 inside granule cells), held per lineage rather than shared. Numeric design variables give trend
 dimensions, one per column, so orthogonal polynomials of time give one
-dimension per temporal shape. On the Wilk
+dimension per temporal shape; inside cell types on the cerebellum the linear one
+became the Purkinje maturation programme (Car8, Itpr1, Pcp2, Calb1) with R²
+against stage 0.20 where the unstratified dimension had 0.87, the rest being
+composition. On the Wilk
 cohort, where every COVID-19 donor is male, `design_key={"disease": [0], "sex":
 [1]}` moved XIST from the disease block, whose top gene it had been, to the top
 of the sex block, with the disease dimension alone still at within-cell-type

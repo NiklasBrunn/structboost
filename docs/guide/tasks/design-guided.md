@@ -260,7 +260,20 @@ block wider than one for a single numeric column warns, since it can only
 repeat itself). A dimension *per time point* is one indicator column per
 level with one dimension each; under the unique-part rule each dimension then
 keeps that level's contrast against the reference level, and a programme
-confined to one time point lands in that level's dimension. Check the result with
+confined to one time point lands in that level's dimension. With
+`design_within="cell_type"` the cell type becomes part of the fit: the time
+blocks keep the cell-type × time interaction beyond the cell-type main effect,
+so composition change between stages is removed and only within-type change
+remains (the encoder still sees genes only). On the cerebellum this changed
+the programme the block found: the linear within-type dimension became the
+Purkinje and GABAergic maturation programme (Car8, Itpr1, Pcp2, Calb1,
+Itpka), monotone with stage inside Purkinje cells (ρ −0.71) and flat inside
+granule cells, with an R² against stage of 0.20 where the unstratified
+maturation dimension had 0.87; the difference is composition, granule cells
+arriving postnatally. The granule programme moved to the quadratic dimension,
+and the sex block took Gabra6 alongside Xist, since the sex composition of the
+pooled embryos varies with stage and what two polynomials leave of stage is
+confounded with sex inside cell types. Check the result with
 
 ```python
 adata.uns["bae"]["latent_design_r2_per_dim"]   # near one on the constrained dimensions is the goal
