@@ -697,6 +697,33 @@ def test_wide_block_fills_its_rank_and_warns_beyond_it():
     assert model._design_blocks["cond"].tolist() == [0, 1, 2]
 
 
+def test_numeric_design_variables_give_trend_dimensions():
+    """A numeric variable spans one direction: a block of one dimension per
+    orthogonal polynomial of time gives one dimension per temporal shape."""
+    _require_bae()
+    adata = _planted2()
+    n = adata.n_obs
+    t = np.repeat(np.linspace(0, 1, 6), n // 6)
+    X = np.asarray(adata.X, dtype=np.float64)
+    X[:, 40:48] += 1.5 * (t[:, None] - 0.5)
+    X[:, 48:54] += 4.5 * ((t[:, None] - 0.5) ** 2 - 1 / 12)
+    adata.X = ((X - X.mean(0)) / X.std(0)).astype(np.float32)
+    P = np.polynomial.legendre.legvander(2 * t - 1, 2)
+    adata.obs["t_lin"], adata.obs["t_quad"] = P[:, 1], P[:, 2]
+    _fit(
+        adata,
+        design_key={"t_lin": [0], "t_quad": [1]},
+        config=dict(latent_dim=5, max_iterations=40),
+    )
+    W, Z = adata.varm["BAE_encoder_weights"], adata.obsm["X_bae"]
+    assert abs(np.corrcoef(Z[:, 0], t)[0, 1]) > 0.8
+    assert abs(np.corrcoef(Z[:, 1], (t - 0.5) ** 2)[0, 1]) > 0.7
+    assert len(set(np.flatnonzero(W[:, 0])) & set(range(40, 48))) >= 6
+    assert len(set(np.flatnonzero(W[:, 1])) & set(range(48, 54))) >= 4
+    with pytest.warns(UserWarning, match="rank 1"):
+        _fit(adata, design_key={"t_lin": [0, 1]}, config=dict(latent_dim=4))
+
+
 def test_design_key_and_decompose_key_combine():
     _require_bae()
     adata = _planted2()

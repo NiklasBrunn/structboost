@@ -930,14 +930,11 @@ class BAE(nn.Module):
                 return orth(strata) if strata is not None else np.full((n, 1), n**-0.5)
             obs = adata.obs[list(subset)]
             numeric = obs.select_dtypes("number")
-            design = np.hstack(
-                [
-                    pd.get_dummies(obs.drop(columns=numeric.columns).astype(str)).to_numpy(
-                        np.float64
-                    ),
-                    numeric.to_numpy(np.float64),
-                ]
-            )
+            categorical = obs.drop(columns=numeric.columns)
+            parts = [numeric.to_numpy(np.float64)]
+            if not categorical.empty:
+                parts.insert(0, pd.get_dummies(categorical.astype(str)).to_numpy(np.float64))
+            design = np.hstack(parts)
             if strata is None:
                 return orth(np.column_stack([np.ones(n), design]))
             return orth(

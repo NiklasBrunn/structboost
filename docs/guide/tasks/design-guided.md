@@ -249,7 +249,18 @@ LIGER factors, shipped with the data, found the same granule maturation axis
 cells) but as one factor per lineage; LIGER's integration across libraries
 removed the nested sample effect (R² 0.07 against 0.85) and separated cell
 types better with 100 dense factors (kNN 0.92 against 0.85), where the block
-gives one shared maturation dimension with a 47-gene list. Check the result with
+gives one shared maturation dimension with a 47-gene list.
+
+Two other ways to ask for time. A *numeric* column spans one direction, so
+`design_key={"age_days": [0]}` gives the dimension that carries the genes
+trending with time, and several numeric columns holding orthogonal
+polynomials or spline bases of time give one dimension per temporal shape
+(`{"t_lin": [0], "t_quad": [1]}`: a trend dimension and a U-shaped one; a
+block wider than one for a single numeric column warns, since it can only
+repeat itself). A dimension *per time point* is one indicator column per
+level with one dimension each; under the unique-part rule each dimension then
+keeps that level's contrast against the reference level, and a programme
+confined to one time point lands in that level's dimension. Check the result with
 
 ```python
 adata.uns["bae"]["latent_design_r2_per_dim"]   # near one on the constrained dimensions is the goal
