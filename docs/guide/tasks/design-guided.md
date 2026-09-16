@@ -273,7 +273,22 @@ maturation dimension had 0.87; the difference is composition, granule cells
 arriving postnatally. The granule programme moved to the quadratic dimension,
 and the sex block took Gabra6 alongside Xist, since the sex composition of the
 pooled embryos varies with stage and what two polynomials leave of stage is
-confounded with sex inside cell types. Check the result with
+confounded with sex inside cell types. A dimension *per developmental
+process* is a numeric column per lineage, time inside the lineage and zero
+outside, one dimension each (`design_key={"t_RL": [0], "t_VZ": [1],
+"t_glia": [2]}`); each block then keeps its lineage's time trend beyond the
+others'. On the cerebellum with the authors' three lineages, the rhombic-lip
+dimension became the granule maturation programme (Gabra6, Kcnd2, Cadps2,
+Gabrd, Rbfox3; ρ with time 0.88 inside the lineage, 0.83 along the authors'
+granule states), the ventricular-zone dimension the Purkinje and interneuron
+differentiation programme (Tfap2b, Ebf1, Grid2, Lhx1, Meis2; |ρ| 0.81 inside,
+0.85 in Purkinje cells, 0.77 in interneurons) and the glial dimension the
+progenitor-to-glia programme (Apoe, Top2a, Rfx4, Gjc3; ρ 0.79 inside, 0.45
+along the authors' glial states), with block R² 0.78, 0.62 and 0.65, at most
+11 genes shared between two blocks and latent correlations at most 0.13.
+The constraint holds inside the lineage only: outside it a block is free,
+and the granule dimension also ran with time inside glia (ρ −0.61). Four
+blocks with sex exclusive took 2.1× the time of three. Check the result with
 
 ```python
 adata.uns["bae"]["latent_design_r2_per_dim"]   # near one on the constrained dimensions is the goal
