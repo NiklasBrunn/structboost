@@ -221,6 +221,10 @@ and on the cerebellum time course a free dimension's sex and chemistry R² of
 0.76 and 0.36 fell to 0.02 and 0.01 (stage, given as a linear trend, stayed:
 the option is exact for what the design subspace spans). The excluded part is a
 design part of those dimensions in the weight split.
+With every design variable exclusive this is a one-fit analysis without
+annotations: the blocks read as coefficients, the free dimensions on their
+genes, and groups formed on the free dimensions serve to read the fit, not to
+refit (the guide shows the cerebellum reading).
 
 `plot_selection_trace` and `plot_selection_paths` gain `decided_by`, the part
 whose counterfactual the markers flag against, defaulting to `no_design` when a

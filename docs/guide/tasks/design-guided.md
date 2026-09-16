@@ -457,6 +457,31 @@ subspace; the categorical stage would exclude it. A nonlinear response, an
 interaction with a variable not in the strata, or variation merely confounded
 with the design likewise stays where reconstruction puts it.
 
+### One fit, design variables only
+
+When no annotation is to enter the model, this is the whole analysis, in one
+fit: every design variable exclusive in its own block, the rest free.
+
+```python
+model.fit(adata, design_key={"sex": [0], "t_lin": [1], "assay": [2]}, design_exclusive=True)
+```
+
+The blocks are read like coefficients: R² against their own variable, signed
+genes, attribution and null. The free dimensions are read on their genes alone,
+and any grouping of cells you form on them stays a reading aid on this fit,
+never the input of a second one: a grouping made from the free dimensions is
+already a function of the model, so refitting with it as `design_within` would
+guide the model with its own output. Use the groups to look at the blocks
+(the trend dimension's course inside each group) and, through
+`residual_variance_shares`, at what the fit left. On the cerebellum fit above,
+six k-means groups on the ten free dimensions were each carried by two
+dimensions and their genes (Top2a, Cdc25c, Kif23 for a cycling group; Slc1a3,
+Tnc, Plpp3 for one present at every stage); the trend dimension rose
+monotonically inside every group (ρ with stage 0.63 to 0.87) and the residual
+time share stayed below 0.01 in each, so the linear trend was fully carried by
+its block. Cell types, if available, enter only afterwards, to check the
+groups: 85% Purkinje cells in one, 78% macroglia in another.
+
 ## Where does a gene's score come from? The decomposition
 
 The design term above changes the fit. The decomposition does not: it reads the
