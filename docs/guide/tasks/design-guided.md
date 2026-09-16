@@ -232,7 +232,18 @@ composition of the pooled embryos. Adding the block,
 `design_key={"stage": [0, 1, 2], "sex": [3]}`, put Xist at the top of the sex
 dimension (sex AUROC 0.996, R² 0.88), removed the embryonic globin from the
 stage block entirely, and left the maturation dimension's gene list, its
-R² (0.86) and its stage ordering unchanged with a sex AUROC of 0.52. Check the result with
+R² (0.86) and its stage ordering unchanged with a sex AUROC of 0.52. The 10x
+chemistry did reach the embedding, on two free dimensions rather than the
+block: a UMAP of the guided latent space split into three groups that were
+chemistry (85% pure) and sample date, each holding every cell type. Since
+every stage run on the newer chemistry also has older-chemistry samples, the
+chemistry is separable from stage, and `batch_key="assay"` with
+`batch_integration_mode="both"` removed it: the three UMAP groups became the
+three lineages (ventricular zone, rhombic lip and glia, 83%, 90% and 62% pure)
+with chemistry at its base rate in each, and the maturation dimension kept its
+genes and R² (0.87). What no correction can remove is the sample-date effect
+nested in stage, one animal per stage per date: within E13.5 alone, sample
+explains 22% to 31% of the stage dimensions' variance. Check the result with
 
 ```python
 adata.uns["bae"]["latent_design_r2_per_dim"]   # near one on the constrained dimensions is the goal

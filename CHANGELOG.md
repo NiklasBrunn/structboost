@@ -185,7 +185,11 @@ differentiation states, while the other two carry stage mixed with sex (Xist),
 blood and mitochondrial transcripts, which the plain fit's residual
 decomposition had already flagged as the stage-confounded nuisance; a sex block
 alongside (`{"stage": [0, 1, 2], "sex": [3]}`) took Xist (sex AUROC 0.996) and
-the globin out of the stage block and left the maturation dimension unchanged. On the Wilk
+the globin out of the stage block and left the maturation dimension unchanged;
+the 10x chemistry had split the embedding on two free dimensions and
+`batch_key="assay", batch_integration_mode="both"` removed it (UMAP groups became
+the three lineages at 83%, 90% and 62% purity), with the maturation dimension
+again unchanged. On the Wilk
 cohort, where every COVID-19 donor is male, `design_key={"disease": [0], "sex":
 [1]}` moved XIST from the disease block, whose top gene it had been, to the top
 of the sex block, with the disease dimension alone still at within-cell-type
