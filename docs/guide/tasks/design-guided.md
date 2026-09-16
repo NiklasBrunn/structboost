@@ -224,8 +224,15 @@ transcripts. For a factor that dominant the plain fit already holds most of the
 time structure (the first free dimension of the guided fit still reached R²
 0.56), and the decomposition of the plain fit's residual turned into a
 quality-control readout: its between-stage column was Xist, haemoglobins and
-mitochondrial genes, which is the argument for a sex block and a quality
-covariate rather than for guidance. Check the result with
+mitochondrial genes, which is the argument for a sex block rather than for
+batch correction: assay version, mitochondrial and haemoglobin fractions each
+explained under 2% of any dimension beyond stage, while sex explained 20% of
+one stage dimension, almost all of it through the stage-dependent sex
+composition of the pooled embryos. Adding the block,
+`design_key={"stage": [0, 1, 2], "sex": [3]}`, put Xist at the top of the sex
+dimension (sex AUROC 0.996, R² 0.88), removed the embryonic globin from the
+stage block entirely, and left the maturation dimension's gene list, its
+R² (0.86) and its stage ordering unchanged with a sex AUROC of 0.52. Check the result with
 
 ```python
 adata.uns["bae"]["latent_design_r2_per_dim"]   # near one on the constrained dimensions is the goal
