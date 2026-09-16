@@ -469,7 +469,7 @@ class BAE(nn.Module):
         self._design_blocks: dict[str, np.ndarray] | None = None
         self._design_lambdas: dict[str, float] | None = None
         self._design_within: list[str] | None = None
-        self._design_exclusive: bool = False
+        self._design_exclusive: list[str] | None = None
         self._decompose_columns: list[str] | None = None
         self._decompose_within: list[str] | None = None
         self._encoder_components: dict[str, np.ndarray] | None = None
@@ -896,7 +896,11 @@ class BAE(nn.Module):
         return full
 
     def _design_subspaces(
-        self, adata: AnnData, columns: list[str], within: list[str] | None
+        self,
+        adata: AnnData,
+        columns: list[str],
+        within: list[str] | None,
+        exclusive: list[str] | None = None,
     ) -> dict[frozenset, np.ndarray]:
         """Orthonormal bases of the design subspaces the filters and the decomposition use.
 
@@ -943,6 +947,8 @@ class BAE(nn.Module):
             )
 
         subsets = [tuple(columns), *(tuple(c for c in columns if c != v) for v in columns), ()]
+        if exclusive:
+            subsets.append(tuple(c for c in columns if c in exclusive))
         return {frozenset(subset): basis(subset) for subset in dict.fromkeys(subsets)}
 
     @staticmethod
@@ -1561,15 +1567,17 @@ class BAE(nn.Module):
                             targets[:, dims], alpha=alpha
                         )
             if self._design_exclusive:
-                # The complement on the free dimensions: what the design explains
-                # beyond the intercept or the strata leaves their targets, so it
-                # can live only in its block.
+                # The complement on the free dimensions: everything the exclusive
+                # variables explain beyond the intercept or the strata, what they
+                # share with the other variables included, leaves those targets.
                 free = np.setdiff1d(
                     np.arange(targets.shape[1]), np.concatenate(list(self._design_blocks.values()))
                 )
                 if free.size:
                     block = targets[:, free].astype(np.float64)
-                    kept = self._design_keep(design[joint], design[frozenset()], block)
+                    kept = self._design_keep(
+                        design[frozenset(self._design_exclusive)], design[frozenset()], block
+                    )
                     targets[:, free] = (block - kept).astype(targets.dtype)
             if attribute:
                 # The design part is replayed too, for its scores and counterfactual;
@@ -2036,7 +2044,7 @@ class BAE(nn.Module):
         batch_integration_mode: Literal["encoder", "decoder", "both"] = _MODE_UNSET,  # type: ignore[assignment]
         design_key: str | list[str] | dict[str, list[int]] | None = None,
         design_within: str | list[str] | None = None,
-        design_exclusive: bool = False,
+        design_exclusive: bool | str | list[str] = False,
         decompose_key: str | list[str] | None = None,
         decompose_within: str | list[str] | None = None,
         track_selection_path: bool = False,
@@ -2179,14 +2187,16 @@ class BAE(nn.Module):
             between conditions. ``latent_design_r2_per_dim`` then reports the share
             of within-stratum variance the design explains. Requires ``design_key``.
         design_exclusive
-            Also remove the design-explained part from the targets of the *free*
-            dimensions, the complement of what the blocks keep, so a linear design
-            effect (inside the strata, with ``design_within``) can live only in its
-            block. Without it the free dimensions are reconstruction-only and may
-            carry the design too, since the orthogonalization only decorrelates
-            them approximately. Exact for what the design subspace spans; a
-            nonlinear response or variation merely confounded with the design is
-            not in that subspace and is not removed. Requires ``design_key``.
+            Which design variables may live *only* in their block: ``True`` for
+            all of them, or the names of some. Everything an exclusive variable
+            explains (inside the strata, with ``design_within``), including what
+            it shares with a non-exclusive variable, is removed from the targets of
+            the free dimensions, the complement of what the blocks keep. Without
+            it the free dimensions are reconstruction-only and may carry the design
+            too, since the orthogonalization only decorrelates them approximately.
+            Exact for what the design subspace spans; a nonlinear response or
+            variation merely confounded with the design is not in that subspace
+            and is not removed. Requires ``design_key``.
         decompose_key
             **Exploratory.** Obs column(s) naming design variables by which the
             *reconstruction* gradient is split, as a diagnostic that leaves the
@@ -2532,7 +2542,7 @@ class BAE(nn.Module):
 
         # --- Design guidance and the reconstruction-gradient decomposition ---
         self._design_blocks = self._design_lambdas = self._design_within = None
-        self._design_exclusive = False
+        self._design_exclusive = None
         self._decompose_columns = self._decompose_within = None
         design = decompose = None
 
@@ -2602,8 +2612,19 @@ class BAE(nn.Module):
                     )
             self._design_blocks, self._design_lambdas = blocks, lambdas
             self._design_within = resolve_within(design_within, columns, "design_within")
-            self._design_exclusive = bool(design_exclusive)
-            design = self._design_subspaces(adata, columns, self._design_within)
+            if design_exclusive is True:
+                self._design_exclusive = list(columns)
+            elif design_exclusive:
+                exclusive = resolve_columns(design_exclusive, "design_exclusive")
+                if set(exclusive) - set(columns):
+                    raise ValueError(
+                        "design_exclusive names variables that are not in design_key: "
+                        f"{sorted(set(exclusive) - set(columns))}"
+                    )
+                self._design_exclusive = exclusive
+            design = self._design_subspaces(
+                adata, columns, self._design_within, self._design_exclusive
+            )
             joint = frozenset(columns)
             for v, dims in blocks.items():
                 rank = design[joint].shape[1] - design[joint - {v}].shape[1]
@@ -3043,7 +3064,9 @@ class BAE(nn.Module):
             prior_dims=prior_dims,
         )
         design = (
-            self._design_subspaces(adata, list(self._design_blocks), self._design_within)
+            self._design_subspaces(
+                adata, list(self._design_blocks), self._design_within, self._design_exclusive
+            )
             if self._design_blocks is not None
             else None
         )
@@ -3939,7 +3962,8 @@ class BAE(nn.Module):
             uns_dict["design_lambda"] = dict(self._design_lambdas)
             if self._design_within is not None:
                 uns_dict["design_within"] = list(self._design_within)
-            uns_dict["design_exclusive"] = self._design_exclusive
+            if self._design_exclusive:
+                uns_dict["design_exclusive"] = list(self._design_exclusive)
             uns_dict["latent_design_r2_per_dim"] = r2
         if self._decompose_columns is not None:
             uns_dict["decompose_key"] = list(self._decompose_columns)

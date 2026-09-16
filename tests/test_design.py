@@ -746,16 +746,30 @@ def test_design_exclusive_keeps_the_design_out_of_the_free_dimensions():
     r2 = latent_r2_per_dim(cond, adata.obsm["X_bae"])
     assert r2[0] > 0.3
     assert r2[1:].max() < 1e-3 < leak_without
-    assert adata.uns["bae"]["design_exclusive"] is True
+    assert adata.uns["bae"]["design_exclusive"] == ["cond"]
     assert not np.array_equal(adata.varm["BAE_encoder_weights"], W_without)
     np.testing.assert_allclose(_parts_sum(adata), adata.varm["BAE_encoder_weights"], atol=1e-6)
     # The excluded part shows up as a design part on the free dimensions.
     assert np.abs(adata.varm["BAE_encoder_weights_design"][:, 1:]).max() > 0
     loaded = BAE.load(model.save(__import__("tempfile").mkdtemp() + "/excl.pt"))
-    assert loaded._design_exclusive is True
+    assert loaded._design_exclusive == ["cond"]
     np.testing.assert_array_equal(loaded.transform(adata.copy()), model.transform(adata.copy()))
     with pytest.raises(ValueError, match="without a design_key"):
         _fit(adata, design_exclusive=True)
+    # Per variable: sex exclusive, condition not. Sex leaves the free dimensions,
+    # condition may stay; what sex shares with condition leaves too.
+    sex = (adata.obs["sex"] == "f").to_numpy(dtype=float)[:, None]
+    _fit(
+        adata,
+        design_key={"cond": [0], "sex": [1]},
+        design_exclusive="sex",
+        config=dict(latent_dim=5, disentanglement="none"),
+    )
+    Z = adata.obsm["X_bae"]
+    assert latent_r2_per_dim(sex, Z)[2:].max() < 1e-3
+    assert adata.uns["bae"]["design_exclusive"] == ["sex"]
+    with pytest.raises(ValueError, match="not in design_key"):
+        _fit(adata, design_key={"cond": [0]}, design_exclusive=["sex"])
 
 
 def test_design_key_and_decompose_key_combine():

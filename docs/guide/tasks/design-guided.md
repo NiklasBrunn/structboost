@@ -429,10 +429,20 @@ block, and every constrained dimension answers "is this pattern in the data"
 while every free dimension answers "what else is there".
 
 ```python
-model.fit(adata, design_key={"sex": [0], "age_days": [1]}, design_exclusive=True)
-adata.uns["bae"]["latent_design_r2_per_dim"]     # near zero on the free dimensions
+model.fit(adata, design_key={"sex": [0], "age_days": [1]}, design_exclusive=True)     # every variable
+model.fit(adata, design_key={"sex": [0], "age_days": [1]}, design_exclusive="sex")    # sex only
+adata.uns["bae"]["latent_design_r2_per_dim"]     # near zero on the free dimensions for the exclusive variables
 adata.varm["BAE_encoder_weights_design"]        # the excluded part appears as a design part there
 ```
+
+`design_exclusive` names the variables that may live only in their block,
+`True` for all of them. Everything an exclusive variable explains leaves the
+free dimensions, including what it shares with a non-exclusive variable: "sex
+is exclusive" means no sex-explained variation anywhere outside its block,
+while a non-exclusive variable's block still keeps its unique part and the rest
+of that variable stays where reconstruction puts it. That is the choice for a
+factor you want isolated (sex, chemistry) next to one you want the free
+dimensions to keep reflecting (time in a developmental series).
 
 On planted data the free dimensions' condition R² went from 0.29 and 0.23 to
 0.000 with the block unchanged. On the cerebellum time course with sex, a

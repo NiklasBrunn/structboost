@@ -208,7 +208,10 @@ decomposed variable, 3.3 s with two and cell-type strata (one backward pass per
 subset of the variables).
 
 
-**`design_exclusive=True` keeps the design out of the free dimensions.** A block
+**`design_exclusive` keeps chosen design variables out of the free dimensions.**
+`True` for all of them or the names of some; everything an exclusive variable
+explains leaves the free dimensions, what it shares with a non-exclusive
+variable included. A block
 keeps what its variable explains; the free dimensions were reconstruction-only
 and could carry the design too (a free dimension of a stage-guided cerebellum
 fit reached stage R² 0.56). The option applies the complement on the free
