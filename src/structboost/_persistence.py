@@ -355,6 +355,8 @@ def restore_payload(cls: type[BAE], payload: dict[str, Any], device: Any) -> BAE
     model._design_lambdas = None if lambdas is None else {v: float(x) for v, x in lambdas.items()}
     for name in ("design_within", "design_exclusive", "decompose_columns", "decompose_within"):
         value = payload.get(name)
+        if value is True:  # checkpoints from before per-variable exclusivity: every design variable
+            value = list(blocks or ())
         setattr(model, f"_{name}", None if not value else list(value))
     model._encoder_components = _map_leaves(payload.get("encoder_components"), _array)
     model._selection_trace = _map_leaves(payload.get("selection_trace"), _array)
