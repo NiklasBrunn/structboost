@@ -605,7 +605,7 @@ def test_residual_variance_shares_per_stratum_pool_to_the_stored_table():
     # A stratum holding one condition only spans nothing beyond its mean: share 0.
     adata.obs.loc[labels == "0", "cond"] = "wt"
     by_ct = model.residual_variance_shares(adata, per_stratum=True)
-    assert (by_ct[("between_cond", "0")] == 0).all()
+    np.testing.assert_allclose(by_ct[("between_cond", "0")], 0, atol=1e-12)
     assert by_ct[("between_cond", "1")].iloc[:8].min() > 0.05
     with pytest.raises(ValueError, match="decompose_within"):
         _fit(adata, decompose_key="cond").residual_variance_shares(adata, per_stratum=True)

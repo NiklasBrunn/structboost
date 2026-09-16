@@ -902,8 +902,7 @@ class BAE(nn.Module):
         Keyed by subsets of ``columns``: the joint design ``J``, every leave-one-out
         design ``J \\ {v}``, and the empty design. Without ``within`` the empty
         design is the intercept and a subset's basis spans the intercept plus its
-        encoded columns (through ``encode_obs_covariates``, so numeric columns
-        work). With ``within`` -- the stratified form -- the empty design spans the
+        indicator and numeric columns. With ``within`` -- the stratified form -- the empty design spans the
         stratum indicators and every other subset the stratum-by-design
         interaction, so ``P_S - P_∅`` is the design effect *inside* the strata with
         the stratum main effect, typically cell type, removed rather than kept.
@@ -913,26 +912,31 @@ class BAE(nn.Module):
         ``J``, which is what makes ``P_J - P_{J\\v}`` a projector and the parts of
         the decomposition additive.
         """
+        import pandas as pd
         from scipy.linalg import orth
-
-        from ._utils import encode_obs_covariates
 
         n = adata.n_obs
         strata = None
         if within:
-            import pandas as pd
-
             labels = adata.obs[list(within)].astype(str).agg("|".join, axis=1)
             strata = pd.get_dummies(labels).to_numpy(dtype=np.float64)
 
         def basis(subset: tuple[str, ...]) -> np.ndarray:
-            # A variable constant on these cells (a stratum with one condition)
-            # spans nothing beyond the intercept and is left out.
-            subset = tuple(c for c in subset if adata.obs[c].nunique() > 1)
+            # Full indicator columns plus numeric columns, no reference level and no
+            # rank check: the SVD drops what the intercept or the strata already
+            # span, so a level absent from these cells or two collinear variables
+            # (an assay run at one stage only) just contribute nothing.
             if not subset:
                 return orth(strata) if strata is not None else np.full((n, 1), n**-0.5)
-            design = np.asarray(
-                encode_obs_covariates(adata, list(subset)).encoded, dtype=np.float64
+            obs = adata.obs[list(subset)]
+            numeric = obs.select_dtypes("number")
+            design = np.hstack(
+                [
+                    pd.get_dummies(obs.drop(columns=numeric.columns).astype(str)).to_numpy(
+                        np.float64
+                    ),
+                    numeric.to_numpy(np.float64),
+                ]
             )
             if strata is None:
                 return orth(np.column_stack([np.ones(n), design]))
