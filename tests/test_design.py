@@ -724,6 +724,40 @@ def test_numeric_design_variables_give_trend_dimensions():
         _fit(adata, design_key={"t_lin": [0, 1]}, config=dict(latent_dim=4))
 
 
+def test_design_exclusive_keeps_the_design_out_of_the_free_dimensions():
+    """The complementary filter: with it, no free dimension carries the design
+    beyond rounding; without it the free dimensions may; the exact split and the
+    persistence round trip hold either way."""
+    _require_bae()
+    from structboost import BAE
+    from structboost._utils import latent_r2_per_dim
+
+    adata = _planted2()
+    cond = (adata.obs["cond"] == "ko").to_numpy(dtype=float)[:, None]
+    _fit(adata, design_key={"cond": [0]}, config=dict(latent_dim=4, disentanglement="none"))
+    leak_without = latent_r2_per_dim(cond, adata.obsm["X_bae"])[1:].max()
+    W_without = adata.varm["BAE_encoder_weights"].copy()
+    model = _fit(
+        adata,
+        design_key={"cond": [0]},
+        design_exclusive=True,
+        config=dict(latent_dim=4, disentanglement="none"),
+    )
+    r2 = latent_r2_per_dim(cond, adata.obsm["X_bae"])
+    assert r2[0] > 0.3
+    assert r2[1:].max() < 1e-3 < leak_without
+    assert adata.uns["bae"]["design_exclusive"] is True
+    assert not np.array_equal(adata.varm["BAE_encoder_weights"], W_without)
+    np.testing.assert_allclose(_parts_sum(adata), adata.varm["BAE_encoder_weights"], atol=1e-6)
+    # The excluded part shows up as a design part on the free dimensions.
+    assert np.abs(adata.varm["BAE_encoder_weights_design"][:, 1:]).max() > 0
+    loaded = BAE.load(model.save(__import__("tempfile").mkdtemp() + "/excl.pt"))
+    assert loaded._design_exclusive is True
+    np.testing.assert_array_equal(loaded.transform(adata.copy()), model.transform(adata.copy()))
+    with pytest.raises(ValueError, match="without a design_key"):
+        _fit(adata, design_exclusive=True)
+
+
 def test_design_key_and_decompose_key_combine():
     _require_bae()
     adata = _planted2()

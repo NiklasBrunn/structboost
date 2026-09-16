@@ -469,6 +469,7 @@ class BAE(nn.Module):
         self._design_blocks: dict[str, np.ndarray] | None = None
         self._design_lambdas: dict[str, float] | None = None
         self._design_within: list[str] | None = None
+        self._design_exclusive: bool = False
         self._decompose_columns: list[str] | None = None
         self._decompose_within: list[str] | None = None
         self._encoder_components: dict[str, np.ndarray] | None = None
@@ -1559,6 +1560,17 @@ class BAE(nn.Module):
                         targets[:, dims] = disentangle_boosting_targets(
                             targets[:, dims], alpha=alpha
                         )
+            if self._design_exclusive:
+                # The complement on the free dimensions: what the design explains
+                # beyond the intercept or the strata leaves their targets, so it
+                # can live only in its block.
+                free = np.setdiff1d(
+                    np.arange(targets.shape[1]), np.concatenate(list(self._design_blocks.values()))
+                )
+                if free.size:
+                    block = targets[:, free].astype(np.float64)
+                    kept = self._design_keep(design[joint], design[frozenset()], block)
+                    targets[:, free] = (block - kept).astype(targets.dtype)
             if attribute:
                 # The design part is replayed too, for its scores and counterfactual;
                 # its *weights* are still taken as the exact remainder below.
@@ -2024,6 +2036,7 @@ class BAE(nn.Module):
         batch_integration_mode: Literal["encoder", "decoder", "both"] = _MODE_UNSET,  # type: ignore[assignment]
         design_key: str | list[str] | dict[str, list[int]] | None = None,
         design_within: str | list[str] | None = None,
+        design_exclusive: bool = False,
         decompose_key: str | list[str] | None = None,
         decompose_within: str | list[str] | None = None,
         track_selection_path: bool = False,
@@ -2165,6 +2178,15 @@ class BAE(nn.Module):
             cell type rather than separating cell types whose composition differs
             between conditions. ``latent_design_r2_per_dim`` then reports the share
             of within-stratum variance the design explains. Requires ``design_key``.
+        design_exclusive
+            Also remove the design-explained part from the targets of the *free*
+            dimensions, the complement of what the blocks keep, so a linear design
+            effect (inside the strata, with ``design_within``) can live only in its
+            block. Without it the free dimensions are reconstruction-only and may
+            carry the design too, since the orthogonalization only decorrelates
+            them approximately. Exact for what the design subspace spans; a
+            nonlinear response or variation merely confounded with the design is
+            not in that subspace and is not removed. Requires ``design_key``.
         decompose_key
             **Exploratory.** Obs column(s) naming design variables by which the
             *reconstruction* gradient is split, as a diagnostic that leaves the
@@ -2321,6 +2343,10 @@ class BAE(nn.Module):
         if design_key is None and design_within is not None:
             raise ValueError(
                 "design_within was given without a design_key; there is nothing to stratify"
+            )
+        if design_key is None and design_exclusive:
+            raise ValueError(
+                "design_exclusive was given without a design_key; there is nothing to exclude"
             )
         if decompose_key is None and decompose_within is not None:
             raise ValueError(
@@ -2506,6 +2532,7 @@ class BAE(nn.Module):
 
         # --- Design guidance and the reconstruction-gradient decomposition ---
         self._design_blocks = self._design_lambdas = self._design_within = None
+        self._design_exclusive = False
         self._decompose_columns = self._decompose_within = None
         design = decompose = None
 
@@ -2575,6 +2602,7 @@ class BAE(nn.Module):
                     )
             self._design_blocks, self._design_lambdas = blocks, lambdas
             self._design_within = resolve_within(design_within, columns, "design_within")
+            self._design_exclusive = bool(design_exclusive)
             design = self._design_subspaces(adata, columns, self._design_within)
             joint = frozenset(columns)
             for v, dims in blocks.items():
@@ -3911,6 +3939,7 @@ class BAE(nn.Module):
             uns_dict["design_lambda"] = dict(self._design_lambdas)
             if self._design_within is not None:
                 uns_dict["design_within"] = list(self._design_within)
+            uns_dict["design_exclusive"] = self._design_exclusive
             uns_dict["latent_design_r2_per_dim"] = r2
         if self._decompose_columns is not None:
             uns_dict["decompose_key"] = list(self._decompose_columns)

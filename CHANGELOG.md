@@ -208,6 +208,14 @@ decomposed variable, 3.3 s with two and cell-type strata (one backward pass per
 subset of the variables).
 
 
+**`design_exclusive=True` keeps the design out of the free dimensions.** A block
+keeps what its variable explains; the free dimensions were reconstruction-only
+and could carry the design too (a free dimension of a stage-guided cerebellum
+fit reached stage R² 0.56). The option applies the complement on the free
+dimensions' targets, exact for what the design subspace spans: on planted data
+their condition R² went from 0.29 and 0.23 to 0.000 with the block unchanged.
+The excluded part is a design part of those dimensions in the weight split.
+
 `plot_selection_trace` and `plot_selection_paths` gain `decided_by`, the part
 whose counterfactual the markers flag against, defaulting to `no_design` when a
 design term is on and to `no_between` — the target without the design-explained

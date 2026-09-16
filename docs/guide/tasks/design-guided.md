@@ -416,6 +416,30 @@ their own ten genes with precision and recall 1.0 and none of the other's, and
 `design_lambda={"sex": 0}` switched the sex block off (R² 0.002, nothing
 selected) while the condition block came out unchanged.
 
+## Keeping the design out of the free dimensions
+
+A block *keeps* the design-explained part of its own target; it says nothing
+about the free dimensions, which are reconstruction-only and may carry the
+design too, since the orthogonalization only decorrelates them approximately.
+On the cerebellum time course a free dimension of a stage-guided fit still
+reached stage R² 0.56. `design_exclusive=True` applies the complement on the
+free dimensions: what the joint design explains beyond the intercept (or the
+strata) leaves their targets, so a linear design effect can live only in its
+block, and every constrained dimension answers "is this pattern in the data"
+while every free dimension answers "what else is there".
+
+```python
+model.fit(adata, design_key={"sex": [0], "age_days": [1]}, design_exclusive=True)
+adata.uns["bae"]["latent_design_r2_per_dim"]     # near zero on the free dimensions
+adata.varm["BAE_encoder_weights_design"]        # the excluded part appears as a design part there
+```
+
+On planted data the free dimensions' condition R² went from 0.29 and 0.23 to
+0.000 with the block unchanged. Exact for what the design subspace spans; a
+nonlinear response, an interaction with a variable not in the strata, or
+variation merely confounded with the design is not in that subspace and stays
+where reconstruction puts it.
+
 ## Where does a gene's score come from? The decomposition
 
 The design term above changes the fit. The decomposition does not: it reads the

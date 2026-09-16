@@ -281,6 +281,7 @@ def build_payload(model: BAE) -> dict[str, Any]:
         "design_blocks": _to_primitive(model._design_blocks),
         "design_lambdas": _to_primitive(model._design_lambdas),
         "design_within": _to_primitive(model._design_within),
+        "design_exclusive": bool(model._design_exclusive),
         "decompose_columns": _to_primitive(model._decompose_columns),
         "decompose_within": _to_primitive(model._decompose_within),
         "encoder_components": _map_leaves(model._encoder_components, _tensor),
@@ -355,6 +356,7 @@ def restore_payload(cls: type[BAE], payload: dict[str, Any], device: Any) -> BAE
     for name in ("design_within", "decompose_columns", "decompose_within"):
         value = payload.get(name)
         setattr(model, f"_{name}", None if value is None else list(value))
+    model._design_exclusive = bool(payload.get("design_exclusive", False))
     model._encoder_components = _map_leaves(payload.get("encoder_components"), _array)
     model._selection_trace = _map_leaves(payload.get("selection_trace"), _array)
     model._selection_path = _map_leaves(payload.get("selection_path"), _array)
