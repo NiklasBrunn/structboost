@@ -206,7 +206,26 @@ TMEM176B; AUROC 0.97 within CD14 monocytes, near 0.5 in lymphocytes), a
 complement and non-classical-monocyte programme (C1QA, C1QB, C1QC, MSR1, SPIC;
 0.85 within non-classical monocytes, 0.89 within neutrophils) and a
 pan-lymphoid interferon and cytotoxic programme (XAF1, IFI44L, MX1, IFIT3, GNLY,
-GZMA; 0.83 to 0.89 across T, NK and B cells). Check the result with
+GZMA; 0.83 to 0.89 across T, NK and B cells).
+
+A time course is the other case for a wide block, and there no strata are
+needed: twelve stages encode to eleven columns. On the mouse cerebellum atlas
+of Sepp et al. 2023 (60,000 nuclei, E10.5 to adult, 15 dimensions, 600
+iterations), `design_key={"stage": [0, 1, 2]}` with the model given the stage
+and nothing else reached R² 0.67, 0.87 and 0.73 (shuffled stages: 0.006), with
+pairwise correlations at most 0.29. The middle dimension is a postnatal
+maturation programme led by Gabra6, the mature granule-cell marker, that rises
+with age inside every neuronal population and inside glia (Spearman 0.88 in
+granule cells and interneurons, 0.72 in Purkinje cells) and runs monotonically
+along the authors' own differentiation states, which the model never saw. The
+other two carry stage mixed with what travels with stage in that design: Xist
+(sex composition of the pooled embryos), embryonic globin and mitochondrial
+transcripts. For a factor that dominant the plain fit already holds most of the
+time structure (the first free dimension of the guided fit still reached R²
+0.56), and the decomposition of the plain fit's residual turned into a
+quality-control readout: its between-stage column was Xist, haemoglobins and
+mitochondrial genes, which is the argument for a sex block and a quality
+covariate rather than for guidance. Check the result with
 
 ```python
 adata.uns["bae"]["latent_design_r2_per_dim"]   # near one on the constrained dimensions is the goal
