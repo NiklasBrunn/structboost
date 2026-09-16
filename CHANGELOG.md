@@ -189,7 +189,8 @@ the globin out of the stage block and left the maturation dimension unchanged;
 the 10x chemistry had split the embedding on two free dimensions and
 `batch_key="assay", batch_integration_mode="both"` removed it (UMAP groups became
 the three lineages at 83%, 90% and 62% purity), with the maturation dimension
-again unchanged. On the Wilk
+again unchanged. The authors' LIGER factor 6 is the same granule maturation axis
+(correlation 0.88 inside granule cells), held per lineage rather than shared. On the Wilk
 cohort, where every COVID-19 donor is male, `design_key={"disease": [0], "sex":
 [1]}` moved XIST from the disease block, whose top gene it had been, to the top
 of the sex block, with the disease dimension alone still at within-cell-type

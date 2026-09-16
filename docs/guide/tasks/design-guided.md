@@ -243,7 +243,13 @@ three lineages (ventricular zone, rhombic lip and glia, 83%, 90% and 62% pure)
 with chemistry at its base rate in each, and the maturation dimension kept its
 genes and R² (0.87). What no correction can remove is the sample-date effect
 nested in stage, one animal per stage per date: within E13.5 alone, sample
-explains 22% to 31% of the stage dimensions' variance. Check the result with
+explains 22% to 31% of the stage dimensions' variance. The authors' own 100
+LIGER factors, shipped with the data, found the same granule maturation axis
+(their factor 6 and the block's dimension correlate at 0.88 inside granule
+cells) but as one factor per lineage; LIGER's integration across libraries
+removed the nested sample effect (R² 0.07 against 0.85) and separated cell
+types better with 100 dense factors (kNN 0.92 against 0.85), where the block
+gives one shared maturation dimension with a 47-gene list. Check the result with
 
 ```python
 adata.uns["bae"]["latent_design_r2_per_dim"]   # near one on the constrained dimensions is the goal
