@@ -435,10 +435,17 @@ adata.varm["BAE_encoder_weights_design"]        # the excluded part appears as a
 ```
 
 On planted data the free dimensions' condition R² went from 0.29 and 0.23 to
-0.000 with the block unchanged. Exact for what the design subspace spans; a
-nonlinear response, an interaction with a variable not in the strata, or
-variation merely confounded with the design is not in that subspace and stays
-where reconstruction puts it.
+0.000 with the block unchanged. On the cerebellum time course with sex, a
+linear time trend and the 10x chemistry as one dimension each and no batch
+key, the blocks alone left one free dimension carrying sex and chemistry at
+R² 0.76 and 0.36 (the part the two share through sample composition, which
+the unique-part rule gives to neither block); with the option they fell to
+0.02 and 0.01 while the blocks kept theirs. Exact for what the design
+subspace spans, and only that: stage leakage stayed at 0.52 because time was
+given as a linear trend, so the non-linear stage structure is not in the
+subspace; the categorical stage would exclude it. A nonlinear response, an
+interaction with a variable not in the strata, or variation merely confounded
+with the design likewise stays where reconstruction puts it.
 
 ## Where does a gene's score come from? The decomposition
 
