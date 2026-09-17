@@ -2,7 +2,7 @@
 
 :::{admonition} Exploratory
 :class: caution
-New in 0.7.0, measured on simulated data and on one real cohort (below). The
+New in 0.7.0, measured on simulated data. The
 mechanism and the readout are exact; how it behaves across experimental designs
 is not yet known. Expect defaults and names to move.
 :::
@@ -36,9 +36,8 @@ tools were built for.
    second variable says the design is confounded and names the genes.
 2. **Ask where.** `model.residual_variance_shares(adata, per_stratum=True)`
    splits the same shares by cell type. A gene the model uses and still misses
-   along disease (GNLY inside effector CD8 T cells on Wilk) and a programme it
-   never picked up (C1QA/B/C in non-classical monocytes) look the same in the
-   pooled table and different here.
+   along disease inside one cell type and a programme it never picked up in
+   another look the same in the pooled table and different here.
 3. **Ask whether it mattered for the selection.** The trace's `no_between`
    column says on which steps the design-explained variance decided a pick;
    `plot_selection_trace` and `plot_selection_paths` show it per step and per
@@ -123,36 +122,6 @@ already separates. A numeric design column gives a linear trend, not groups; pas
 timepoints as a categorical column for groups.
 :::
 
-### On a real cohort
-
-Wilk et al. 2020 (PBMCs, seven COVID-19 patients and six healthy donors, 44k
-cells after QC, 2,000 HVGs, ten latent dimensions, defaults with 400
-iterations). Disease is nested in donor, so no donor covariate was given; the
-number to read is the disease AUROC *within* cell types.
-
-| | within-cell-type disease AUROC | cell-type kNN accuracy |
-| --- | --- | --- |
-| PCA, 10 components | 0.88 | 0.82 |
-| scVI, 10 dimensions | 0.95 | 0.88 |
-| BAE, plain | 0.80 | 0.79 |
-| BAE, `design_key="disease"` | 0.90 (0.88 from dimension 0 alone) | 0.78 |
-| shuffled labels | dimension 0 alone: 0.53 | 0.78 |
-
-The design dimension held 24 genes: an interferon block (IFI27, IFI44, IFI44L,
-IFI6, IFIT3, MX1, XAF1), the plasmablast expansion (IGHG1, IGHG4, IGLC3, JCHAIN),
-the CD16 monocyte and class II changes (FCGR3A, MS4A7, HLA-DQB1), S100A8 and
-S100A9, SOCS3 and cytotoxic markers — the paper's headline findings in one
-dimension. 96% of its boosting steps were decided by the design term; the
-interferon genes entered on both objectives (rank 0 without the design step),
-S100A8, GNLY and SOCS3 only because of it (ranks 69, 612 and 390). The other
-nine dimensions and the reconstruction quality were unchanged. XIST was selected
-too: sex is unbalanced between the cohorts, and the term finds any gene that
-tracks the labels, so a sex covariate belongs in `batch_key` on such a cohort.
-Donor as `batch_key` removed the disease signal entirely, from the BAE and from
-scVI alike, as nesting predicts. With 1,000 iterations, `boosting_nu=0.3`,
-`batch_size=1024` and a `(64, 128)` decoder every BAE arm improved (guided 0.92,
-dimension 0 alone 0.90, plain 0.82) at about twice the genes per dimension.
-
 ## Heterogeneous data: keep the effect inside each cell type
 
 When cell-type composition differs between conditions, a dimension that
@@ -176,15 +145,6 @@ this matters most, and it is also the situation where a donor `batch_key` must
 *not* be given: every donor is one condition, so mandatory donor regressors in
 the boosting fit absorb the disease effect entirely.
 
-On the Wilk cohort the stratified form concentrated the design dimension on the
-myeloid response: AUROC 0.97 within CD14 monocytes and 0.93 within dendritic
-cells and neutrophils, 0.65 to 0.77 within lymphocytes, with FCGR1A, CSF3R,
-MS4A7, TMEM176B and SOCS3 replacing the immunoglobulin and cytotoxic genes of
-the unstratified dimension. Removing the cell-type main effect drops the
-pan-lymphoid interferon component, so the pooled separation is lower (0.86
-against 0.90) while the within-monocyte readout is sharper. Which is wanted
-depends on the question.
-
 A variable's block defaults to the next `min(q, latent_dim)` dimensions, `q` being the
 number of encoded design columns (levels minus one per categorical column). The
 design subspace has dimension `q`, so more constrained dimensions than that
@@ -198,58 +158,16 @@ programme with pairwise correlation below 0.01. That needs the default
 orthogonalization: the filter undoes it inside a block, so a second pass runs
 inside each block after the filter, staying in the kept subspace; without
 orthogonalization two of the three dimensions converged on the same
-programme. On the Wilk cohort (15 dimensions, 1,000 iterations)
-`design_key={"disease": [0, 1, 2], "sex": [3]}` with cell-type strata gave three
-disease profiles, R² 0.34, 0.21 and 0.29 with pairwise correlation at most
-0.27: a classical-monocyte programme (CLU, FCGR1A, IFI27, TGFBI, TNFAIP2,
-TMEM176B; AUROC 0.97 within CD14 monocytes, near 0.5 in lymphocytes), a
-complement and non-classical-monocyte programme (C1QA, C1QB, C1QC, MSR1, SPIC;
-0.85 within non-classical monocytes, 0.89 within neutrophils) and a
-pan-lymphoid interferon and cytotoxic programme (XAF1, IFI44L, MX1, IFIT3, GNLY,
-GZMA; 0.83 to 0.89 across T, NK and B cells).
+programme.
 
 A time course is the other case for a wide block, and there no strata are
-needed: twelve stages encode to eleven columns. On the mouse cerebellum atlas
-of Sepp et al. 2023 (60,000 nuclei, E10.5 to adult, 15 dimensions, 600
-iterations), `design_key={"stage": [0, 1, 2]}` with the model given the stage
-and nothing else reached R² 0.67, 0.87 and 0.73 (shuffled stages: 0.006), with
-pairwise correlations at most 0.29. The middle dimension is a postnatal
-maturation programme led by Gabra6, the mature granule-cell marker, that rises
-with age inside every neuronal population and inside glia (Spearman 0.88 in
-granule cells and interneurons, 0.72 in Purkinje cells) and runs monotonically
-along the authors' own differentiation states, which the model never saw. The
-other two carry stage mixed with what travels with stage in that design: Xist
-(sex composition of the pooled embryos), embryonic globin and mitochondrial
-transcripts. For a factor that dominant the plain fit already holds most of the
-time structure (the first free dimension of the guided fit still reached R²
-0.56), and the decomposition of the plain fit's residual turned into a
-quality-control readout: its between-stage column was Xist, haemoglobins and
-mitochondrial genes, which is the argument for a sex block rather than for
-batch correction: assay version, mitochondrial and haemoglobin fractions each
-explained under 2% of any dimension beyond stage, while sex explained 20% of
-one stage dimension, almost all of it through the stage-dependent sex
-composition of the pooled embryos. Adding the block,
-`design_key={"stage": [0, 1, 2], "sex": [3]}`, put Xist at the top of the sex
-dimension (sex AUROC 0.996, R² 0.88), removed the embryonic globin from the
-stage block entirely, and left the maturation dimension's gene list, its
-R² (0.86) and its stage ordering unchanged with a sex AUROC of 0.52. The 10x
-chemistry did reach the embedding, on two free dimensions rather than the
-block: a UMAP of the guided latent space split into three groups that were
-chemistry (85% pure) and sample date, each holding every cell type. Since
-every stage run on the newer chemistry also has older-chemistry samples, the
-chemistry is separable from stage, and `batch_key="assay"` with
-`batch_integration_mode="both"` removed it: the three UMAP groups became the
-three lineages (ventricular zone, rhombic lip and glia, 83%, 90% and 62% pure)
-with chemistry at its base rate in each, and the maturation dimension kept its
-genes and R² (0.87). What no correction can remove is the sample-date effect
-nested in stage, one animal per stage per date: within E13.5 alone, sample
-explains 22% to 31% of the stage dimensions' variance. The authors' own 100
-LIGER factors, shipped with the data, found the same granule maturation axis
-(their factor 6 and the block's dimension correlate at 0.88 inside granule
-cells) but as one factor per lineage; LIGER's integration across libraries
-removed the nested sample effect (R² 0.07 against 0.85) and separated cell
-types better with 100 dense factors (kNN 0.92 against 0.85), where the block
-gives one shared maturation dimension with a 47-gene list.
+needed: twelve stages encode to eleven columns, and the block's dimensions
+take the stage programmes in order of the variance they explain. What
+travels with stage in the design (sex composition of pooled embryos, blood
+and mitochondrial transcripts) is stage to the term; a block for that
+factor alongside, or `batch_key` for a chemistry that is separable from
+stage, keeps it out of the stage block, and the plain fit's residual
+decomposition (below) says beforehand which it is.
 
 Two other ways to ask for time. A *numeric* column spans one direction, so
 `design_key={"age_days": [0]}` gives the dimension that carries the genes
@@ -264,31 +182,13 @@ confined to one time point lands in that level's dimension. With
 `design_within="cell_type"` the cell type becomes part of the fit: the time
 blocks keep the cell-type × time interaction beyond the cell-type main effect,
 so composition change between stages is removed and only within-type change
-remains (the encoder still sees genes only). On the cerebellum this changed
-the programme the block found: the linear within-type dimension became the
-Purkinje and GABAergic maturation programme (Car8, Itpr1, Pcp2, Calb1,
-Itpka), monotone with stage inside Purkinje cells (ρ −0.71) and flat inside
-granule cells, with an R² against stage of 0.20 where the unstratified
-maturation dimension had 0.87; the difference is composition, granule cells
-arriving postnatally. The granule programme moved to the quadratic dimension,
-and the sex block took Gabra6 alongside Xist, since the sex composition of the
-pooled embryos varies with stage and what two polynomials leave of stage is
-confounded with sex inside cell types. A dimension *per developmental
+remains (the encoder still sees genes only). A dimension *per developmental
 process* is a numeric column per lineage, time inside the lineage and zero
 outside, one dimension each (`design_key={"t_RL": [0], "t_VZ": [1],
 "t_glia": [2]}`); each block then keeps its lineage's time trend beyond the
-others'. On the cerebellum with the authors' three lineages, the rhombic-lip
-dimension became the granule maturation programme (Gabra6, Kcnd2, Cadps2,
-Gabrd, Rbfox3; ρ with time 0.88 inside the lineage, 0.83 along the authors'
-granule states), the ventricular-zone dimension the Purkinje and interneuron
-differentiation programme (Tfap2b, Ebf1, Grid2, Lhx1, Meis2; |ρ| 0.81 inside,
-0.85 in Purkinje cells, 0.77 in interneurons) and the glial dimension the
-progenitor-to-glia programme (Apoe, Top2a, Rfx4, Gjc3; ρ 0.79 inside, 0.45
-along the authors' glial states), with block R² 0.78, 0.62 and 0.65, at most
-11 genes shared between two blocks and latent correlations at most 0.13.
-The constraint holds inside the lineage only: outside it a block is free,
-and the granule dimension also ran with time inside glia (ρ −0.61). Four
-blocks with sex exclusive took 2.1× the time of three. Check the result with
+others'. The constraint holds inside the lineage only: outside it, where the column
+is zero, the block is free and may follow another lineage's time. Check the
+result with
 
 ```python
 adata.uns["bae"]["latent_design_r2_per_dim"]   # near one on the constrained dimensions is the goal
@@ -414,18 +314,7 @@ design variables, `P_J − P_{J∖v}` with `J` the joint design: the unique part
 For one variable this is the projector of the previous sections. For two
 confounded variables it means that what they share is filtered out of *both*
 blocks, the conservative choice: a block cannot carry signal the data cannot
-tell apart from another variable's. On the Wilk cohort, where every COVID-19
-donor is male and two of the six healthy donors are female, sex and disease
-share most of their between-group variance, and `design_key={"disease": [0],
-"sex": [1]}` gives each block only the part the other cannot explain: XIST,
-the top gene of the single-variable disease dimension in the section above,
-leaves the disease block and heads the sex block, while the disease dimension
-alone still separates the conditions within cell types at AUROC 0.88 (R² 0.42;
-the sex block R² 0.29, since the only sex contrast the data can attribute to
-sex is among the healthy donors). With `design_within="cell_type"` as well, the
-disease block keeps the myeloid programme of the stratified section, IFI27,
-SOCS3, FCGR1A and TMEM176B at AUROC 0.98 within CD14 monocytes, and XIST still
-heads the sex block. On the same planted data with the second variable,
+tell apart from another variable's. On the same planted data with the second variable,
 `design_key=["cond", "sex"]` gave two blocks of R² 0.72 that each recovered
 their own ten genes with precision and recall 1.0 and none of the other's, and
 `design_lambda={"sex": 0}` switched the sex block off (R² 0.002, nothing
@@ -436,9 +325,7 @@ selected) while the condition block came out unchanged.
 A block *keeps* the design-explained part of its own target; it says nothing
 about the free dimensions, which are reconstruction-only and may carry the
 design too, since the orthogonalization only decorrelates them approximately.
-On the cerebellum time course a free dimension of a stage-guided fit still
-reached stage R² 0.56. `design_exclusive=True` applies the complement on the
-free dimensions: what the joint design explains beyond the intercept (or the
+`design_exclusive=True` applies the complement on the free dimensions: what the joint design explains beyond the intercept (or the
 strata) leaves their targets, so a linear design effect can live only in its
 block, and every constrained dimension answers "is this pattern in the data"
 while every free dimension answers "what else is there".
@@ -460,15 +347,12 @@ factor you want isolated (sex, chemistry) next to one you want the free
 dimensions to keep reflecting (time in a developmental series).
 
 On planted data the free dimensions' condition R² went from 0.29 and 0.23 to
-0.000 with the block unchanged. On the cerebellum time course with sex, a
-linear time trend and the 10x chemistry as one dimension each and no batch
-key, the blocks alone left one free dimension carrying sex and chemistry at
-R² 0.76 and 0.36 (the part the two share through sample composition, which
-the unique-part rule gives to neither block); with the option they fell to
-0.02 and 0.01 while the blocks kept theirs. Exact for what the design
-subspace spans, and only that: stage leakage stayed at 0.52 because time was
-given as a linear trend, so the non-linear stage structure is not in the
-subspace; the categorical stage would exclude it. A nonlinear response, an
+0.000 with the block unchanged. Two blocks alone can leave the part two
+variables share through sample composition on a free dimension, since the
+unique-part rule gives it to neither block; the option removes it. Exact for
+what the design subspace spans, and only that: time given as a linear trend
+leaves the non-linear stage structure outside the subspace and so outside the
+option; the categorical stage would exclude it. A nonlinear response, an
 interaction with a variable not in the strata, or variation merely confounded
 with the design likewise stays where reconstruction puts it.
 
@@ -488,14 +372,7 @@ never the input of a second one: a grouping made from the free dimensions is
 already a function of the model, so refitting with it as `design_within` would
 guide the model with its own output. Use the groups to look at the blocks
 (the trend dimension's course inside each group) and, through
-`residual_variance_shares`, at what the fit left. On the cerebellum fit above,
-six k-means groups on the ten free dimensions were each carried by two
-dimensions and their genes (Top2a, Cdc25c, Kif23 for a cycling group; Slc1a3,
-Tnc, Plpp3 for one present at every stage); the trend dimension rose
-monotonically inside every group (ρ with stage 0.63 to 0.87) and the residual
-time share stayed below 0.01 in each, so the linear trend was fully carried by
-its block. Cell types, if available, enter only afterwards, to check the
-groups: 85% Purkinje cells in one, 78% macroglia in another.
+`residual_variance_shares`, at what the fit left. Cell types, if available, enter only afterwards, to check the groups.
 
 ## Where does a gene's score come from? The decomposition
 
@@ -562,12 +439,7 @@ from, and `residual_variance_shares(adata, per_stratum=True)` takes the same
 split inside every stratum: which cell types carry a variable's effect, gene by
 gene. The pooled `between_<v>` column is exactly the per-stratum shares
 weighted by each stratum's share of the gene's residual sum of squares, so the
-two tables cannot disagree. On Wilk it took 4 seconds on 44,116 cells and
-placed the complement genes C1QA, C1QB and C1QC in the non-classical monocytes
-and natural killer cells, SOCS3 in monocytes and naive and memory CD4 T cells,
-FCGR1A and LYZ in the monocytes, HBD and ALAS2 in erythrocytes, and GNLY almost
-entirely in effector CD8 T cells, where 18% of its residual variance is a
-disease difference against under 2% anywhere else.
+two tables cannot disagree. It takes seconds on 44k cells.
 
 On the planted data of the sections above (1,000 cells, 500 genes, three cell
 types, ten condition genes shifted by one standard deviation, three seeds,
@@ -582,19 +454,6 @@ is the number the design term is up against. With a second, orthogonal planted
 variable and `decompose_within="stage"`, the between-sex part picked a sex gene
 on 94% of the steps, the strata part a marker gene on every step, and `shared`
 stayed below 0.002 of any gene's residual variance.
-
-On the Wilk cohort, `decompose_key=["disease", "sex"]` with
-`decompose_within="cell_type"` on the plain fit says why disease needs a design
-term there: at the restored iteration the design explains 0.3% of the residual
-variance (between-disease 0.17%, between-sex 0.12%, shared 0.03%) and the
-cell-type main effect 0.4%, the rest is within. The genes whose residual
-variance sits between the conditions are the complement and interferon
-monocyte programme, C1QA, C1QB, C1QC, SOCS3, FCGR1A and CLEC4C; between the
-sexes XIST and an eosinophil and basophil set (CLC, HDC, CCR3, GATA2, MS4A3);
-and the shared column, XIST and HLA-DQB1, is the confounding made visible.
-A quarter of the plain fit's boosting steps (14% to 40% per dimension) would
-have gone to another gene without that variance; on one dimension the picks
-it decided are the interferon genes IFI27, IFITM3, IRF7, OAS3 and SIGLEC1.
 
 ```python
 plot_selection_trace(adata, dims=[0])                               # hollow marker: without the design variance, another gene
@@ -611,8 +470,8 @@ the covariance cache; the leaders' predictor–target product is computed apart
 from the followers' so that the fit stays bitwise the plain one. Measured at
 2,000 cells and 2,000 or 5,000 genes over 20 iterations, the fit time with a
 `design_key` was within run-to-run noise of the plain fit, and so were the
-per-variable blocks on the Wilk cohort (44,116 cells, 2,000 genes, 4 threads:
-1.5 s per iteration either way). The decomposition adds one backward pass
+per-variable blocks at 44k cells and 2,000 genes (4 threads: 1.5 s per
+iteration either way). The decomposition adds one backward pass
 through the decoder per subset of its variables, two for one variable and
 `m + 2` for `m`: on the same data 2.0 s per iteration for one variable and
 3.3 s for two variables with cell-type strata. The stored trace is a few

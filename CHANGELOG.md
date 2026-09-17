@@ -131,9 +131,7 @@ the same way, a design-free score of every gene, selected or not, computed from
 the fitted model's residual by the new `BAE.residual_variance_shares`, whose
 `per_stratum=True` takes the split inside every stratum — which cell types carry
 a variable's effect — with the pooled column the exact residual-weighted sum of
-the per-stratum ones (4 s on the Wilk cohort; it placed C1QA/B/C in the
-non-classical monocytes and NK cells, SOCS3 in monocytes and CD4 T cells, GNLY in
-effector CD8 T cells). The trace's
+the per-stratum ones (4 s at 44k cells). The trace's
 `no_between` column is the analogue of `no_design`: the pick the fit would have
 made without the design-explained residual variance; on the planted data it
 flagged 75% of the 48 steps the plain fit spent on a condition gene against 7%
@@ -172,59 +170,29 @@ since the filter undoes the first: on planted data with one condition programme
 per cell type, `design_key={"cond": [0, 1, 2]}` with strata took one programme
 per dimension (pairwise correlation below 0.01) where it had converged on one,
 and `fit` warns when a block is wider than the rank of what it keeps, one for a
-binary variable without strata. A three-dimension disease block inside cell
-types on the Wilk cohort gave three profiles with pairwise correlation at most
-0.27: classical monocytes (FCGR1A, IFI27, TNFAIP2; AUROC 0.97 within CD14
-monocytes), complement and non-classical monocytes (C1QA/B/C, MSR1) and a
-pan-lymphoid interferon response (MX1, IFIT3, GNLY, GZMA). On the mouse
-cerebellum time course of Sepp et al. 2023 (twelve stages, 60,000 nuclei), a
-three-dimension stage block with no strata and no cell-type information reached
-R² 0.67, 0.87 and 0.73 against 0.006 for shuffled stages; its middle dimension
-is a postnatal maturation programme (Gabra6 on top) monotone along the authors'
-differentiation states, while the other two carry stage mixed with sex (Xist),
-blood and mitochondrial transcripts, which the plain fit's residual
-decomposition had already flagged as the stage-confounded nuisance; a sex block
-alongside (`{"stage": [0, 1, 2], "sex": [3]}`) took Xist (sex AUROC 0.996) and
-the globin out of the stage block and left the maturation dimension unchanged;
-the 10x chemistry had split the embedding on two free dimensions and
-`batch_key="assay", batch_integration_mode="both"` removed it (UMAP groups became
-the three lineages at 83%, 90% and 62% purity), with the maturation dimension
-again unchanged. The authors' LIGER factor 6 is the same granule maturation axis
-(correlation 0.88 inside granule cells), held per lineage rather than shared. Numeric design variables give trend
+binary variable without strata. Numeric design variables give trend
 dimensions, one per column, so orthogonal polynomials of time give one
-dimension per temporal shape; inside cell types on the cerebellum the linear one
-became the Purkinje maturation programme (Car8, Itpr1, Pcp2, Calb1) with R²
-against stage 0.20 where the unstratified dimension had 0.87, the rest being
-composition. On the Wilk
-cohort, where every COVID-19 donor is male, `design_key={"disease": [0], "sex":
-[1]}` moved XIST from the disease block, whose top gene it had been, to the top
-of the sex block, with the disease dimension alone still at within-cell-type
-AUROC 0.88; and the decomposition of the plain fit put the between-disease
-residual variance on the complement and interferon monocyte genes (C1QA/B/C,
-SOCS3, FCGR1A, CLEC4C), 0.17% of the residual against 99.3% within, and flagged
-a quarter of the plain fit's boosting steps as decided by that variance. Cost on
-that data, 4 threads: 1.5 s per iteration plain or block-guided, 2.0 s with one
-decomposed variable, 3.3 s with two and cell-type strata (one backward pass per
-subset of the variables).
+dimension per temporal shape, and inside cell types (`design_within`) the
+cell-type × time interaction beyond the cell-type main effect, so composition
+change between stages is removed. Cost at 44k cells and 2,000 genes, 4
+threads: 1.5 s per iteration plain or block-guided, 2.0 s with one decomposed
+variable, 3.3 s with two and cell-type strata (one backward pass per subset of
+the variables).
 
 
 **`design_exclusive` keeps chosen design variables out of the free dimensions.**
 `True` for all of them or the names of some; everything an exclusive variable
 explains leaves the free dimensions, what it shares with a non-exclusive
-variable included. A block
-keeps what its variable explains; the free dimensions were reconstruction-only
-and could carry the design too (a free dimension of a stage-guided cerebellum
-fit reached stage R² 0.56). The option applies the complement on the free
-dimensions' targets, exact for what the design subspace spans: on planted data
-their condition R² went from 0.29 and 0.23 to 0.000 with the block unchanged,
-and on the cerebellum time course a free dimension's sex and chemistry R² of
-0.76 and 0.36 fell to 0.02 and 0.01 (stage, given as a linear trend, stayed:
-the option is exact for what the design subspace spans). The excluded part is a
-design part of those dimensions in the weight split.
+variable included. A block keeps what its variable explains; the free
+dimensions were reconstruction-only and could carry the design too. The option
+applies the complement on the free dimensions' targets, exact for what the
+design subspace spans: on planted data their condition R² went from 0.29 and
+0.23 to 0.000 with the block unchanged. The excluded part is a design part of
+those dimensions in the weight split.
 With every design variable exclusive this is a one-fit analysis without
 annotations: the blocks read as coefficients, the free dimensions on their
 genes, and groups formed on the free dimensions serve to read the fit, not to
-refit (the guide shows the cerebellum reading).
+refit.
 
 `plot_selection_trace` and `plot_selection_paths` gain `decided_by`, the part
 whose counterfactual the markers flag against, defaulting to `no_design` when a
