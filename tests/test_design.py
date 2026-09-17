@@ -170,7 +170,7 @@ def test_attribution_is_exact_and_belongs_to_the_restored_iteration():
     assert recon.dtype == np.float64
     # Exact to the encoder's own float32 rounding: the parts are float64 and
     # their sum *is* the float64 matrix the encoder was cast from.
-    assert adata.uns["bae"]["design_dims"].tolist() == [0]
+    assert adata.uns["bae"]["design_blocks"]["cond"].tolist() == [0]
     assert adata.uns["bae"]["design_key"] == ["cond"]
     assert adata.uns["bae"]["design_lambda"] == {"cond": 0.5}
 
@@ -274,9 +274,9 @@ def test_default_dims_follow_the_design_rank_and_arguments_are_validated():
     adata = _planted()
     adata.obs["tp"] = pd.Categorical(np.arange(adata.n_obs) % 4)  # 3 encoded columns
     _fit(adata, design_key="tp")
-    assert adata.uns["bae"]["design_dims"].tolist() == [0, 1, 2]
+    assert adata.uns["bae"]["design_blocks"]["tp"].tolist() == [0, 1, 2]
     _fit(adata, design_key="cond")
-    assert adata.uns["bae"]["design_dims"].tolist() == [0]
+    assert adata.uns["bae"]["design_blocks"]["cond"].tolist() == [0]
 
     with pytest.raises(ValueError, match="disjoint"):
         _fit(adata, design_key={"cond": [3]})
@@ -622,7 +622,6 @@ def test_design_blocks_list_and_dict_forms_and_per_variable_lambda():
     uns = adata.uns["bae"]
     assert {v: d.tolist() for v, d in uns["design_blocks"].items()} == {"cond": [0], "sex": [1]}
     assert uns["design_lambda"] == {"cond": 1.0, "sex": 1.0}
-    assert uns["design_dims"].tolist() == [0, 1]
     assert uns["latent_design_r2_per_dim"][0] > 0.5 and uns["latent_design_r2_per_dim"][1] > 0.5
     # Each block carries its own variable, not the other one.
     Z = adata.obsm["X_bae"]

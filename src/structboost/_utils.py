@@ -241,12 +241,13 @@ def disentangle_boosting_targets(
 def latent_r2_per_dim(design: NDArray[np.floating], Z: NDArray[np.floating]) -> NDArray[np.float64]:
     """Fraction of each latent dimension's variance explained by ``design``.
 
-    Least squares of the centred latent code on the (already standardized, hence
-    centred) design columns. For a categorical design this is the correlation
-    ratio, i.e. the between-group share of variance. Used both for
+    Least squares of the centred latent code on the design columns, which must
+    span the intercept or be centred themselves. For a categorical design this
+    is the correlation ratio, i.e. the between-group share of variance. Used for
     ``latent_obs_r2_per_dim`` (batch integration: near zero is the goal) and for
-    ``latent_design_r2_per_dim`` (design guidance: near one is the goal).
-    ``NaN`` for a constant dimension.
+    ``latent_design_r2_per_dim`` (design guidance: near one is the goal), there
+    on the code with the dropped subspace projected out. ``NaN`` for a constant
+    dimension.
     """
     centered = Z - Z.mean(axis=0, keepdims=True)
     fitted = design @ np.linalg.lstsq(design, centered, rcond=None)[0]

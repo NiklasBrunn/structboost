@@ -448,6 +448,56 @@ def _decided_against(trace, decided_by: str | None) -> str:
     return decided_by
 
 
+def _trace_figure(adata, dims, decided_by, gene_names, figsize, dpi):
+    """What the trace plots start from: the trace, its counterfactual, the dims and
+    gene names to draw, and one axis per dimension."""
+    import matplotlib.pyplot as plt
+
+    trace = adata.uns.get("bae", {}).get("selection_trace")
+    if trace is None:
+        raise KeyError(
+            "adata.uns['bae']['selection_trace'] not found; it is written by "
+            "BAE.fit(design_key=...) or BAE.fit(decompose_key=...)"
+        )
+    decided_by = _decided_against(trace, decided_by)
+    gene = np.asarray(trace["gene"])
+    latent_dim, stepno = gene.shape
+    dims = list(range(latent_dim)) if dims is None else list(dims)
+    if any(d < 0 or d >= latent_dim for d in dims):
+        raise ValueError(f"dims out of range for a {latent_dim}-dimensional code: {dims}")
+    names = np.asarray(adata.var[gene_names] if gene_names else adata.var_names, dtype=str)
+    fig, axes = plt.subplots(
+        len(dims),
+        1,
+        figsize=figsize or (max(6.5, 0.28 * stepno + 1.5), 2.4 * len(dims) + 0.8),
+        dpi=dpi,
+        squeeze=False,
+        sharex=True,
+    )
+    return trace, decided_by, gene, dims, names, fig, axes[:, 0]
+
+
+def _finish_step_axis(ax, dim: int, ylabel: str) -> None:
+    _zero(ax, "y")
+    ax.set_title(f"dim {dim}", fontsize=_TITLE, loc="left", color=_INK)
+    ax.set_ylabel(ylabel, fontsize=_LABEL, color=_MUTED)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.tick_params(color=_MUTED, labelsize=_TICK, labelcolor=_MUTED, length=3)
+
+
+def _finish_trace_figure(fig, axes, handles, *, right: float):
+    axes[-1].set_xlabel("boosting step", fontsize=_LABEL, color=_MUTED)
+    fig.legend(
+        handles=handles,
+        loc="upper center",
+        ncol=min(5, len(handles)),
+        frameon=False,
+        fontsize=_TICK,
+    )
+    fig.tight_layout(rect=(0, 0, right, 0.94))
+    return fig, axes
+
+
 def _palette_for(n_groups: int) -> tuple[str, ...]:
     """Smallest established scheme that covers ``n_groups``."""
     if n_groups <= len(_PALETTE_5):
@@ -1771,39 +1821,15 @@ def plot_selection_trace(
     fig, axes
         The figure and its ``(n_dims,)`` array of axes.
     """
-    import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
 
-    trace = adata.uns.get("bae", {}).get("selection_trace")
-    if trace is None:
-        raise KeyError(
-            "adata.uns['bae']['selection_trace'] not found; it is written by "
-            "BAE.fit(design_key=...) or BAE.fit(decompose_key=...)"
-        )
-    decided_by = _decided_against(trace, decided_by)
-    gene = np.asarray(trace["gene"])
-    latent_dim, stepno = gene.shape
-    dims = list(range(latent_dim)) if dims is None else list(dims)
-    if any(d < 0 or d >= latent_dim for d in dims):
-        raise ValueError(f"dims out of range for a {latent_dim}-dimensional code: {dims}")
-    names = (
-        np.asarray(adata.var[gene_names], dtype=str)
-        if gene_names
-        else np.asarray(adata.var_names, dtype=str)
+    trace, decided_by, gene, dims, names, fig, axes = _trace_figure(
+        adata, dims, decided_by, gene_names, figsize, dpi
     )
+    stepno = gene.shape[1]
     counter = np.asarray(trace["counterfactual_gene"][decided_by])
     steps = np.arange(1, stepno + 1)
     colors = _part_colors(trace["delta"])
-
-    fig, axes = plt.subplots(
-        len(dims),
-        1,
-        figsize=figsize or (max(6.0, 0.28 * stepno), 2.2 * len(dims) + 0.8),
-        dpi=dpi,
-        squeeze=False,
-        sharex=True,
-    )
-    axes = axes[:, 0]
     for ax, dim in zip(axes, dims, strict=True):
         ran = gene[dim] >= 0
         for name, delta in trace["delta"].items():
@@ -1837,12 +1863,7 @@ def plot_selection_trace(
                 va="bottom",
                 color=_MUTED,
             )
-        _zero(ax, "y")
-        ax.set_title(f"dim {dim}", fontsize=_TITLE, loc="left", color=_INK)
-        ax.set_ylabel("cumulative increment", fontsize=_LABEL, color=_MUTED)
-        ax.spines[["top", "right"]].set_visible(False)
-        ax.tick_params(color=_MUTED, labelsize=_TICK, labelcolor=_MUTED, length=3)
-    axes[-1].set_xlabel("boosting step", fontsize=_LABEL, color=_MUTED)
+        _finish_step_axis(ax, dim, "cumulative increment")
     handles = [Line2D([], [], color=colors[n], lw=1.6, label=n) for n in trace["delta"]] + [
         Line2D(
             [],
@@ -1854,15 +1875,7 @@ def plot_selection_trace(
             label=f"{_counterfactual_label(decided_by)}, another gene would have been picked",
         )
     ]
-    fig.legend(
-        handles=handles,
-        loc="upper center",
-        ncol=min(5, len(handles)),
-        frameon=False,
-        fontsize=_TICK,
-    )
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
-    return fig, axes
+    return _finish_trace_figure(fig, axes, handles, right=1.0)
 
 
 def plot_selection_paths(
@@ -1910,40 +1923,16 @@ def plot_selection_paths(
     fig, axes
         The figure and its ``(n_dims,)`` array of axes.
     """
-    import matplotlib.pyplot as plt
     from matplotlib.collections import LineCollection
     from matplotlib.lines import Line2D
 
-    trace = adata.uns.get("bae", {}).get("selection_trace")
-    if trace is None:
-        raise KeyError(
-            "adata.uns['bae']['selection_trace'] not found; it is written by "
-            "BAE.fit(design_key=...) or BAE.fit(decompose_key=...)"
-        )
-    decided_by = _decided_against(trace, decided_by)
-    gene = np.asarray(trace["gene"])
+    trace, decided_by, gene, dims, names, fig, axes = _trace_figure(
+        adata, dims, decided_by, gene_names, figsize, dpi
+    )
+    stepno = gene.shape[1]
     delta = np.asarray(trace["delta"]["total"])
     decided = np.asarray(trace["counterfactual_gene"][decided_by]) != gene
     accent = _PART_COLORS["design"] if decided_by == "no_design" else _BETWEEN_HUES[0]
-    latent_dim, stepno = gene.shape
-    dims = list(range(latent_dim)) if dims is None else list(dims)
-    if any(d < 0 or d >= latent_dim for d in dims):
-        raise ValueError(f"dims out of range for a {latent_dim}-dimensional code: {dims}")
-    names = (
-        np.asarray(adata.var[gene_names], dtype=str)
-        if gene_names
-        else np.asarray(adata.var_names, dtype=str)
-    )
-
-    fig, axes = plt.subplots(
-        len(dims),
-        1,
-        figsize=figsize or (max(6.5, 0.26 * stepno + 1.5), 2.6 * len(dims) + 0.8),
-        dpi=dpi,
-        squeeze=False,
-        sharex=True,
-    )
-    axes = axes[:, 0]
     for ax, dim in zip(axes, dims, strict=True):
         picks, inc = gene[dim], delta[dim]
         selected = np.unique(picks[picks >= 0])
@@ -1993,12 +1982,7 @@ def plot_selection_paths(
                 color=_POS if final >= 0 else _NEG,
                 annotation_clip=False,
             )
-        _zero(ax, "y")
-        ax.set_title(f"dim {dim}", fontsize=_TITLE, loc="left", color=_INK)
-        ax.set_ylabel("coefficient", fontsize=_LABEL, color=_MUTED)
-        ax.spines[["top", "right"]].set_visible(False)
-        ax.tick_params(color=_MUTED, labelsize=_TICK, labelcolor=_MUTED, length=3)
-    axes[-1].set_xlabel("boosting step", fontsize=_LABEL, color=_MUTED)
+        _finish_step_axis(ax, dim, "coefficient")
     handles = [
         Line2D(
             [],
@@ -2011,6 +1995,4 @@ def plot_selection_paths(
             [], [], color=accent, lw=2.4, label=f"{_counterfactual_label(decided_by)}: another gene"
         ),
     ]
-    fig.legend(handles=handles, loc="upper center", ncol=2, frameon=False, fontsize=_TICK)
-    fig.tight_layout(rect=(0, 0, 0.92, 0.94))
-    return fig, axes
+    return _finish_trace_figure(fig, axes, handles, right=0.92)

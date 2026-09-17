@@ -951,29 +951,36 @@ class BAE(nn.Module):
             subsets.append(tuple(c for c in columns if c in exclusive))
         return {frozenset(subset): basis(subset) for subset in dict.fromkeys(subsets)}
 
-    @staticmethod
-    def _design_keep(Q_keep: np.ndarray, Q_drop: np.ndarray | None, T: np.ndarray) -> np.ndarray:
-        """The design-explained part of the columns of ``T`` : ``P_keep T - P_drop T``."""
-        kept = Q_keep @ (Q_keep.T @ T)
-        return kept if Q_drop is None else kept - Q_drop @ (Q_drop.T @ T)
+    def _design_bases(self, adata: AnnData) -> dict[frozenset, np.ndarray]:
+        """The fitted design's subspaces on ``adata``: filter, R² and stability selection."""
+        return self._design_subspaces(
+            adata, list(self._design_blocks), self._design_within, self._design_exclusive
+        )
 
     @staticmethod
-    def _decompose_parts(columns: list[str], stratified: bool) -> dict[str, dict[frozenset, float]]:
-        """The parts of the decomposition as linear combinations of the subsets' ``G_S``.
+    def _design_keep(Q_keep: np.ndarray, Q_drop: np.ndarray, T: np.ndarray) -> np.ndarray:
+        """What ``keep`` explains of the columns of ``T`` beyond ``drop``: ``P_keep T - P_drop T``."""
+        return Q_keep @ (Q_keep.T @ T) - Q_drop @ (Q_drop.T @ T)
 
-        ``between_<v> = G_J - G_{J\\v}``, what ``v`` explains beyond the other
+    @staticmethod
+    def _decompose(columns: list[str], stratified: bool, explained: dict) -> dict:
+        """The parts of the decomposition from the subsets' ``G_S`` and the total ``L``.
+
+        ``explained`` maps each subset of ``columns`` to its ``G_S`` and ``None`` to
+        ``L``, as scalars, gradients or per-gene sums of squares alike. The parts
+        are ``between_<v> = G_J - G_{J\\v}``, what ``v`` explains beyond the other
         variables; ``shared``, the rest of ``G_J - G_∅`` once every unique part is
-        taken out (several variables only); ``strata`` or ``mean``, ``G_∅``. The
-        remaining part, ``within = L - G_J``, is not a combination of the ``G_S``
-        and is formed by the caller.
+        taken out (several variables only); ``strata`` or ``mean``, ``G_∅``; and
+        ``within = L - G_J``. They sum to ``L``.
         """
         joint, empty = frozenset(columns), frozenset()
-        parts = {f"between_{v}": {joint: 1.0, joint - {v}: -1.0} for v in columns}
+        combos = {f"between_{v}": {joint: 1.0, joint - {v}: -1.0} for v in columns}
         if len(columns) > 1:
-            parts["shared"] = {joint: 1.0 - len(columns), empty: -1.0}
-            parts["shared"].update({joint - {v}: 1.0 for v in columns})
-        parts["strata" if stratified else "mean"] = {empty: 1.0}
-        return parts
+            combos["shared"] = {joint: 1.0 - len(columns), empty: -1.0}
+            combos["shared"].update({joint - {v}: 1.0 for v in columns})
+        combos["strata" if stratified else "mean"] = {empty: 1.0}
+        combos["within"] = {None: 1.0, joint: -1.0}
+        return {n: sum(c * explained[k] for k, c in combo.items()) for n, combo in combos.items()}
 
     def residual_variance_shares(
         self,
@@ -1031,33 +1038,20 @@ class BAE(nn.Module):
         def shares(cells, stratified: bool):
             bases = self._design_subspaces(adata[cells], columns, within if stratified else None)
             ss = {key: ((Q.T @ R[cells]) ** 2).sum(axis=0) for key, Q in bases.items()}
-            r_sq = (R[cells] ** 2).sum(axis=0)
-            parts = self._decompose_parts(columns, stratified)
-            cols = {n: sum(c * ss[k] for k, c in combo.items()) for n, combo in parts.items()}
-            cols["within"] = r_sq - ss[frozenset(columns)]
+            ss[None] = (R[cells] ** 2).sum(axis=0)
+            parts = self._decompose(columns, stratified, ss)
             tiny = np.finfo(np.float64).tiny
             return pd.DataFrame(
-                {n: c / (r_sq + tiny) for n, c in cols.items()}, index=adata.var_names
+                {n: c / (ss[None] + tiny) for n, c in parts.items()}, index=adata.var_names
             )
 
         if not per_stratum:
             return shares(slice(None), within is not None)
         labels = adata.obs[list(within)].astype(str).agg("|".join, axis=1).to_numpy()
         tables = {s: shares(labels == s, False) for s in np.unique(labels)}
-        order = [*self._decompose_parts(columns, False), "within"]
+        order = list(next(iter(tables.values())).columns)
         columns_index = pd.MultiIndex.from_product([order, list(tables)], names=["part", "stratum"])
         return pd.concat(tables, axis=1).swaplevel(axis=1).reindex(columns=columns_index)
-
-    @staticmethod
-    def _design_r2(Q_keep: np.ndarray, Q_drop: np.ndarray | None, Z: np.ndarray) -> np.ndarray:
-        """Share of each latent column's (within-stratum) variance the design explains."""
-        Z = np.asarray(Z, dtype=np.float64)
-        centred = Z - Z.mean(axis=0) if Q_drop is None else Z - Q_drop @ (Q_drop.T @ Z)
-        kept = Q_keep @ (Q_keep.T @ centred)
-        total = (centred**2).sum(axis=0)
-        return np.divide(
-            (kept**2).sum(axis=0), total, out=np.full_like(total, np.nan), where=total > 0
-        )
 
     def _validate_transfer_fit(
         self,
@@ -1393,26 +1387,18 @@ class BAE(nn.Module):
                 grads["recon"] = recon_grad
             else:
                 # One backward pass per subset S for G_S = ||Q_Sᵀ R||² / p; every
-                # part is a linear combination of them (`_decompose_parts`).
-                columns = self._decompose_columns
-                parts = self._decompose_parts(columns, self._decompose_within is not None)
+                # part is a linear combination of them and of the total (`_decompose`).
                 R = x_recon - X
-                explained = {
-                    key: torch.autograd.grad(
-                        ((torch.as_tensor(Q, dtype=X.dtype, device=X.device).T @ R) ** 2).sum()
-                        / X.shape[1],
-                        z,
-                        retain_graph=True,
-                    )[0]
-                    for key, Q in decompose.items()
-                }
+                explained: dict[frozenset | None, torch.Tensor] = {None: recon_grad}
+                for key, Q in decompose.items():
+                    Q = torch.as_tensor(Q, dtype=X.dtype, device=X.device)
+                    G = ((Q.T @ R) ** 2).sum() / X.shape[1]
+                    explained[key] = torch.autograd.grad(G, z, retain_graph=True)[0]
                 grads.update(
-                    {
-                        n: sum(c * explained[k] for k, c in combo.items())
-                        for n, combo in parts.items()
-                    }
+                    self._decompose(
+                        self._decompose_columns, self._decompose_within is not None, explained
+                    )
                 )
-                grads["within"] = recon_grad - explained[frozenset(columns)]
 
         # Target = current z moved in negative gradient direction
         with torch.no_grad():
@@ -1528,18 +1514,19 @@ class BAE(nn.Module):
         if between:
             followers["no_between"] = sum(v for n, v in parts.items() if n not in between)
         followers.update({n: parts[n] for n in steps})
-        follower_targets = list(followers.values())
+        orthogonal = self.config.disentanglement == "orthogonal"
 
-        if self.config.disentanglement == "orthogonal":
+        def orthogonalize(T: np.ndarray, parts_of_T: list[np.ndarray]):
             from ._utils import disentangle_boosting_targets
 
             alpha = self.config.disentanglement_alpha
-            if attribute:
-                targets, follower_targets = disentangle_boosting_targets(
-                    targets, alpha=alpha, components=follower_targets
-                )
-            else:
-                targets = disentangle_boosting_targets(targets, alpha=alpha)
+            if not attribute:
+                return disentangle_boosting_targets(T, alpha=alpha), []
+            return disentangle_boosting_targets(T, alpha=alpha, components=parts_of_T)
+
+        if orthogonal:
+            targets, mapped = orthogonalize(targets, list(followers.values()))
+            followers = dict(zip(followers, mapped, strict=True))
 
         if design is not None:
             joint = frozenset(self._design_blocks)
@@ -1548,24 +1535,17 @@ class BAE(nn.Module):
                 kept = self._design_keep(design[joint], design[joint - {variable}], block)
                 factor = self.config.target_optim_lr * self._design_lambdas[variable]
                 targets[:, dims] = (block - factor * (block - kept)).astype(targets.dtype)
-                if dims.size > 1 and self.config.disentanglement == "orthogonal":
+                if dims.size > 1 and orthogonal:
                     # The filter undoes the orthogonalization inside a block, and a
                     # block's dimensions would converge on the kept subspace's
                     # dominant direction; a second pass inside the block keeps them
                     # apart and stays in that subspace, which is closed under
                     # linear combinations, so the constraint remains exact.
-                    if attribute:
-                        targets[:, dims], mapped = disentangle_boosting_targets(
-                            targets[:, dims],
-                            alpha=alpha,
-                            components=[f[:, dims] for f in follower_targets],
-                        )
-                        for follower, part in zip(follower_targets, mapped, strict=True):
-                            follower[:, dims] = part
-                    else:
-                        targets[:, dims] = disentangle_boosting_targets(
-                            targets[:, dims], alpha=alpha
-                        )
+                    targets[:, dims], mapped = orthogonalize(
+                        targets[:, dims], [f[:, dims] for f in followers.values()]
+                    )
+                    for follower, part in zip(followers.values(), mapped, strict=True):
+                        follower[:, dims] = part
             if self._design_exclusive:
                 # The complement on the free dimensions: everything the exclusive
                 # variables explain beyond the intercept or the strata, what they
@@ -1582,8 +1562,7 @@ class BAE(nn.Module):
             if attribute:
                 # The design part is replayed too, for its scores and counterfactual;
                 # its *weights* are still taken as the exact remainder below.
-                followers["design"] = targets - follower_targets[0]
-                follower_targets.append(followers["design"])
+                followers["design"] = targets - followers["no_design"]
 
         self.encoder.reset_weights()
         n_features = boost["sourcemat"].shape[1]
@@ -1618,7 +1597,7 @@ class BAE(nn.Module):
                 kwargs["selection_from"] = np.tile(np.arange(k), 1 + len(followers))
                 if isinstance(fit_mandatory, list):
                     kwargs["mandatory_features"] = fit_mandatory * (1 + len(followers))
-                fit_targets = np.hstack([fit_targets, *follower_targets])
+                fit_targets = np.hstack([fit_targets, *followers.values()])
             result = allboost(boost["sourcemat"], fit_targets, **kwargs)
             betamat, *rest = result if isinstance(result, tuple) else (result,)
             hist = rest[0] if (attribute or path) else None
@@ -1637,60 +1616,57 @@ class BAE(nn.Module):
                 trace,
             )
 
-        def split(matrix: np.ndarray) -> dict[str, np.ndarray]:
-            """Blocks of a stacked (leader, followers...) array as the additive parts.
+        def by_target(stacked: np.ndarray) -> dict[str, np.ndarray]:
+            """The rows of a stacked (leader, followers...) array, ``total`` first."""
+            names = ["total", *followers]
+            return {n: stacked[k * i : k * (i + 1)] for i, n in enumerate(names)}
+
+        def split(stacked: np.ndarray) -> dict[str, np.ndarray]:
+            """The rows as the additive parts of the leader.
 
             The remainder goes to the part that was not replayed: ``carry`` when
             there is no design step, else ``design`` (with ``carry`` taken off the
             no-design target). Either way the parts sum to the leader exactly.
             """
-            block = {n: matrix[k * (i + 1) : k * (i + 2)] for i, n in enumerate(followers)}
-            out = {n: block[n].copy() for n in steps}
-            if "no_design" in block:
-                out["carry"] = block["no_design"] - sum(block[n] for n in steps)
-                out["design"] = matrix[:k] - block["no_design"]
+            rows = by_target(stacked)
+            out = {n: rows[n].copy() for n in steps}
+            if "no_design" in rows:
+                out["carry"] = rows["no_design"] - sum(rows[n] for n in steps)
+                out["design"] = rows["total"] - rows["no_design"]
             else:
-                out["carry"] = matrix[:k] - sum(block[n] for n in steps)
+                out["carry"] = rows["total"] - sum(rows[n] for n in steps)
             return out
 
-        gene_cols = slice(None, self.n_genes)
-        new_parts = {n: v[:, gene_cols] for n, v in split(betamat).items()}
-        delta = {"total": hist.update[:k], **split(hist.update)}
-        stacked = np.vstack([targets.T, *(t.T for t in follower_targets)])
+        new_parts = {n: v[:, : self.n_genes] for n, v in split(betamat).items()}
+        stacked = np.vstack([targets.T, *(t.T for t in followers.values())])
         norm = {"total": np.linalg.norm(targets, axis=0)}
         norm.update({n: np.linalg.norm(v, axis=1) for n, v in split(stacked).items()})
 
-        # Per-step scores of the applied update against each part's residual, all
+        # Per-step scores of the applied update against each target's residual, all
         # from the O(1) bookkeeping allboost keeps: with u the applied increment,
-        # s_c = x_j' r_c and q_c = ||r_c||^2 just before the step,
-        #   fit_score = 1 - ||r_c - u x_j||^2 / ||r_c||^2 = (2 u s_c - u^2 ||x_j||^2) / q_c,
-        #   alignment = s_c / (||x_j|| ||r_c||),   gain = u s_c.
-        gene = hist.selection[:k]
-        rows = {"total": 0, **{n: i + 1 for i, n in enumerate(followers)}}
-        u = hist.update[:k]
+        # s = x_j' r and q = ||r||^2 just before the step,
+        #   fit_score = 1 - ||r - u x_j||^2 / ||r||^2 = (2 u s - u^2 ||x_j||^2) / q,
+        #   alignment = s / (||x_j|| ||r||),   gain = u s.
+        gene, u = hist.selection[:k], hist.update[:k]
+        score, residual_sq = by_target(hist.score), by_target(hist.residual_sq)
+        picks, rank = by_target(hist.selection), by_target(hist.rank)
         xnorm_sq = np.where(gene >= 0, boost["col_norms_sq"][np.maximum(gene, 0)], 0.0).astype(
             np.float64
         )
         eps = np.finfo(np.float64).tiny
-        fit_score, alignment, gain = {}, {}, {}
-        for name, r in rows.items():
-            s_c = hist.score[k * r : k * (r + 1)]
-            q_c = hist.residual_sq[k * r : k * (r + 1)]
-            fit_score[name] = (2.0 * u * s_c - u**2 * xnorm_sq) / (q_c + eps)
-            alignment[name] = s_c / (np.sqrt(xnorm_sq * q_c) + eps)
-            gain[name] = u * s_c
         trace = {
             "gene": gene.copy(),
-            "delta": delta,
-            "counterfactual_gene": {
-                n: hist.selection[k * (i + 1) : k * (i + 2)].copy() for i, n in enumerate(followers)
+            "delta": {"total": u.copy(), **split(hist.update)},
+            "counterfactual_gene": {n: picks[n].copy() for n in followers},
+            "rank": {n: rank[n].copy() for n in followers},
+            "fit_score": {
+                n: (2.0 * u * s - u**2 * xnorm_sq) / (residual_sq[n] + eps)
+                for n, s in score.items()
             },
-            "rank": {
-                n: hist.rank[k * (i + 1) : k * (i + 2)].copy() for i, n in enumerate(followers)
+            "alignment": {
+                n: s / (np.sqrt(xnorm_sq * residual_sq[n]) + eps) for n, s in score.items()
             },
-            "fit_score": fit_score,
-            "alignment": alignment,
-            "gain": gain,
+            "gain": {n: u * s for n, s in score.items()},
             "target_norm": norm,
         }
         return betamat[:k], targets, new_parts, trace
@@ -2622,9 +2598,7 @@ class BAE(nn.Module):
                         f"{sorted(set(exclusive) - set(columns))}"
                     )
                 self._design_exclusive = exclusive
-            design = self._design_subspaces(
-                adata, columns, self._design_within, self._design_exclusive
-            )
+            design = self._design_bases(adata)
             joint = frozenset(columns)
             for v, dims in blocks.items():
                 rank = design[joint].shape[1] - design[joint - {v}].shape[1]
@@ -3063,13 +3037,7 @@ class BAE(nn.Module):
             ),
             prior_dims=prior_dims,
         )
-        design = (
-            self._design_subspaces(
-                adata, list(self._design_blocks), self._design_within, self._design_exclusive
-            )
-            if self._design_blocks is not None
-            else None
-        )
+        design = self._design_bases(adata) if self._design_blocks is not None else None
 
         # Snapshot so the fitted model is unchanged when this returns.
         saved_encoder = self.encoder.linear.weight.detach().clone()
@@ -3951,20 +3919,23 @@ class BAE(nn.Module):
             # dimensions are scored against what its variable explains beyond the
             # others (the part the filter kept), the free ones against the joint design.
             blocks = self._design_blocks
-            Q = self._design_subspaces(adata, list(blocks), self._design_within)
+            Q = self._design_bases(adata)
             joint = frozenset(blocks)
-            r2 = self._design_r2(Q[joint], Q[frozenset()], latent)
+
+            def r2(Q_drop: np.ndarray, Z: np.ndarray) -> np.ndarray:
+                return latent_r2_per_dim(Q[joint], Z - Q_drop @ (Q_drop.T @ Z))
+
+            r2_dims = r2(Q[frozenset()], latent)
             for v, dims in blocks.items():
-                r2[dims] = self._design_r2(Q[joint], Q[joint - {v}], latent[:, dims])
+                r2_dims[dims] = r2(Q[joint - {v}], latent[:, dims])
             uns_dict["design_key"] = list(blocks)
             uns_dict["design_blocks"] = {v: d.copy() for v, d in blocks.items()}
-            uns_dict["design_dims"] = np.concatenate(list(blocks.values()))
             uns_dict["design_lambda"] = dict(self._design_lambdas)
             if self._design_within is not None:
                 uns_dict["design_within"] = list(self._design_within)
             if self._design_exclusive:
                 uns_dict["design_exclusive"] = list(self._design_exclusive)
-            uns_dict["latent_design_r2_per_dim"] = r2
+            uns_dict["latent_design_r2_per_dim"] = r2_dims
         if self._decompose_columns is not None:
             uns_dict["decompose_key"] = list(self._decompose_columns)
             if self._decompose_within is not None:
