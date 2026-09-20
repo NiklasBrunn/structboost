@@ -22,6 +22,14 @@ rows are grouped. Nothing is reassociated. The three call sites that each had
 their own copy of the densify-and-cast expression — `fit`,
 `_iteration_support_frequency` and `_to_tensor` — now share one.
 
+**`_store_results` no longer re-reads the expression matrix.** It densified
+`adata.X` a second time to compute the latent embedding, putting two
+`(n_cells, n_genes)` float32 arrays on the heap at the one moment a fit has the
+most else resident. It has exactly one caller, which is already holding the
+identical tensor, so `fit` hands it over. Together with the block-wise
+densification this is 1.7x faster end to end at 300,000 cells by 2,000 genes
+(44.8 s to 25.9 s) and 1.26x lower in peak memory (10.4 GB to 8.3 GB).
+
 **A fit no longer depends on how `adata.X` is stored.** `csc.toarray()` returns a
 *Fortran-ordered* array where `csr.toarray()` returns a C-ordered one, so on
 identical data the storage format changed the BLAS reduction order and with it

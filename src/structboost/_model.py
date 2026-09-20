@@ -2093,8 +2093,10 @@ class BAE(nn.Module):
 
         self._is_fitted = True
 
-        # Store results in AnnData
-        self._store_results(adata)
+        # Store results in AnnData. `X_train` is handed over rather than re-read:
+        # it is the same matrix, and densifying it twice doubles the peak at the
+        # point in a fit where the most else is already resident.
+        self._store_results(adata, X_train)
 
         # Optional stability selection of the encoder's gene sets. Off by default:
         # it adds a fraction of one fit's cost (see BAE.stability_selection).
@@ -3142,8 +3144,14 @@ class BAE(nn.Module):
         explained = 1.0 - ss_error / ss_total if ss_total > 0 else float("nan")
         return residual, explained
 
-    def _store_results(self, adata: AnnData) -> None:
+    def _store_results(self, adata: AnnData, X: torch.Tensor) -> None:
         """Store results in AnnData (scverse convention).
+
+        ``X`` is the training matrix ``fit`` already holds. It used to be read and
+        densified a second time here, which put two ``(n_cells, n_genes)`` float32
+        arrays on the heap at the one moment a fit has the most else resident --
+        2.4 GB of them at 300,000 cells by 2,000 genes. There is only ever one
+        caller, and it is holding the identical tensor.
 
         Two of the recorded metrics answer different questions and are easy to
         confuse:
@@ -3167,8 +3175,6 @@ class BAE(nn.Module):
         written by every fit; only ``reconstruction_loss_by_obs`` and
         ``latent_obs_r2_per_dim`` require a covariate.
         """
-        X = self._to_tensor(_expression_matrix(adata, self._layer), self.config.device)
-
         # Recorded so a fitted model is itself a usable prior for a later transfer:
         # `from_reference` needs gene identifiers, which the weight matrix lacks.
         self._var_names = np.asarray(adata.var_names, dtype=object)
