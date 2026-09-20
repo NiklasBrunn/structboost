@@ -1478,9 +1478,9 @@ class BAE(nn.Module):
     @staticmethod
     def _to_tensor(X: np.ndarray | sp.spmatrix, device: torch.device) -> torch.Tensor:
         """Convert array or sparse matrix to tensor."""
-        if sp.issparse(X):
-            X = X.toarray()
-        return torch.from_numpy(np.asarray(X, dtype=np.float32)).to(device)
+        from ._utils import densify
+
+        return torch.from_numpy(densify(X)).to(device)
 
     @_isolates_torch_rng(config_fallback=True)
     def fit(
@@ -1718,10 +1718,14 @@ class BAE(nn.Module):
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(seed)
 
-        # Prepare data
+        # Prepare data. `densify` converts in row blocks rather than materializing
+        # a full dense matrix in the source dtype and converting it afterwards --
+        # same bytes, but the peak is the result plus one block instead of the
+        # result plus a whole float64 copy of it.
+        from ._utils import densify
+
         matrix = _expression_matrix(adata, self._layer)
-        X_np = matrix.toarray() if sp.issparse(matrix) else np.asarray(matrix)
-        X_np = X_np.astype(np.float32)
+        X_np = densify(matrix)
 
         # Warn if data doesn't appear standardized. The result also decides whether
         # a PCA warm start needs to center the data (it must not re-transform data
@@ -2255,6 +2259,7 @@ class BAE(nn.Module):
         """
         from ._utils import (
             compute_covariance_cache,
+            densify,
             resolve_mandatory_genes,
             resolve_precompute_covcache,
             transform_obs_covariates,
@@ -2267,8 +2272,7 @@ class BAE(nn.Module):
             torch.manual_seed(seed)
 
         matrix = _expression_matrix(adata, self._layer)
-        X_np = matrix.toarray() if sp.issparse(matrix) else np.asarray(matrix)
-        X_np = X_np.astype(np.float32)
+        X_np = densify(matrix)
         X_train = self._to_tensor(X_np, self.config.device)
 
         D_condition = None

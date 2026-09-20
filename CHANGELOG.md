@@ -3,6 +3,35 @@
 Releases follow [semantic versioning](https://semver.org). While the project is
 pre-1.0, a minor bump may break API.
 
+### [Unreleased]
+
+**Not breaking for CSR or dense input**, which is bit-for-bit unchanged. CSC
+input changes in the last bits, for the reason below.
+
+**The expression matrix is densified in row blocks.** Every place a fit read
+`adata.X` did `matrix.toarray().astype(np.float32)`, which holds the dense panel
+twice at once — once in the source dtype and once converted. On a float64 CSR
+panel that is `12 * n * p` bytes at peak to produce a `4 * n * p` byte result:
+18 GB for 500,000 cells x 3,000 genes, which is where a fit stops being possible
+rather than merely slow. The new `densify` helper converts block by block
+straight into the output, so the peak is the result plus one 32 MB block.
+
+The bytes are identical: `toarray` scatters stored values into a zero-filled
+buffer and the dtype conversion is elementwise, so neither depends on how the
+rows are grouped. Nothing is reassociated. The three call sites that each had
+their own copy of the densify-and-cast expression — `fit`,
+`_iteration_support_frequency` and `_to_tensor` — now share one.
+
+**A fit no longer depends on how `adata.X` is stored.** `csc.toarray()` returns a
+*Fortran-ordered* array where `csr.toarray()` returns a C-ordered one, so on
+identical data the storage format changed the BLAS reduction order and with it
+the fitted encoder weights — measured at 2.3e-9 on a 12-iteration fit, which a
+longer fit amplifies. It also handed torch a non-contiguous training tensor,
+forcing an internal copy on every decoder forward pass. `densify` returns
+C-ordered output whatever the input format, so CSR, CSC and dense input now agree
+bitwise. This is the one behaviour change: a CSC-backed fit will not reproduce
+its pre-0.7 result, and now matches the CSR result for the same data instead.
+
 ### [0.6.0] - 2026-09-09
 
 **Not breaking.** Nothing existing changes behaviour; this adds a way to read a
