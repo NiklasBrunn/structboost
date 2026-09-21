@@ -30,6 +30,31 @@ identical tensor, so `fit` hands it over. Together with the block-wise
 densification this is 1.7x faster end to end at 300,000 cells by 2,000 genes
 (44.8 s to 25.9 s) and 1.26x lower in peak memory (10.4 GB to 8.3 GB).
 
+**The boosting design is one allocation when batch integration is on.** A fit
+that regresses a covariate (`batch_integration_mode` `"encoder"` or `"both"`,
+the default when `batch_key` is given) built its design with
+`np.hstack([panel, covariates])`, which duplicates the whole
+`(n_cells, n_genes)` panel in order to append a handful of columns to it. The
+augmented array is now allocated up front and the panel is read straight into
+its gene block, so only one copy is ever resident.
+
+`X_np` is then a column view of that design: C-ordered within each row, with
+only a wider row stride, which BLAS takes as a leading dimension. Torch runs the
+encoder on it with no copy and returns bit-identical results, which is what
+makes the construction viable — `tests/test_densify.py` pins that property, since
+a future torch that materialized a contiguous copy would silently restore the
+second panel this exists to avoid.
+
+The *obvious* alternative — keeping the two blocks separate and computing
+`X'r`, the column norms and the Gram blockwise — was rejected: splitting a GEMM
+changes its shape and therefore its tiling, so the results would move in the last
+bits.
+
+**The covariate encoding is computed once, not twice.** Under `"both"`, `fit`
+cast the same encoded matrix to float32 separately for each mechanism, and
+`BAE.stability_selection` re-ran `transform_obs_covariates` over the same obs
+columns for each of them. Both now share one result.
+
 **A fit no longer depends on how `adata.X` is stored.** `csc.toarray()` returns a
 *Fortran-ordered* array where `csr.toarray()` returns a C-ordered one, so on
 identical data the storage format changed the BLAS reduction order and with it

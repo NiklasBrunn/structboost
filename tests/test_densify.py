@@ -67,6 +67,77 @@ class TestByteIdentity:
         assert densify(sparse, block_bytes=0).tobytes() == densify(sparse).tobytes()
 
 
+class TestWritingIntoAView:
+    """``out=`` is what lets the boosting design be one allocation.
+
+    ``fit`` builds ``(n_cells, n_genes + n_nuisance)`` up front and reads the
+    panel into its gene block, instead of densifying separately and copying the
+    result in with ``hstack``.
+    """
+
+    @pytest.mark.parametrize("fmt", (*FORMATS, "dense"))
+    @pytest.mark.parametrize("dtype", DTYPES)
+    def test_column_block_of_a_wider_array(self, matrix, fmt, dtype):
+        payload = matrix.astype(dtype) if fmt == "dense" else _as_sparse(matrix, fmt, dtype)
+        n_rows, n_cols = matrix.shape
+        design = np.empty((n_rows, n_cols + 3), dtype=np.float32)
+        block = densify(payload, out=design[:, :n_cols])
+
+        assert block.base is design
+        assert not block.flags["C_CONTIGUOUS"]  # a strided view, by construction
+        # Same values as the allocating form, which is what keeps a fit identical.
+        assert block.tobytes() == _reference(payload).tobytes()
+
+    def test_nuisance_columns_are_untouched(self, matrix):
+        n_rows, n_cols = matrix.shape
+        design = np.zeros((n_rows, n_cols + 2), dtype=np.float32)
+        design[:, n_cols:] = 7.5
+        densify(_as_sparse(matrix, "csr", np.float64), out=design[:, :n_cols])
+        assert (design[:, n_cols:] == 7.5).all()
+
+    def test_out_dtype_wins_over_dtype_argument(self, matrix):
+        out = np.empty(matrix.shape, dtype=np.float64)
+        assert densify(_as_sparse(matrix, "csr", np.float64), dtype=np.float32, out=out) is out
+        assert out.dtype == np.float64
+
+    def test_shape_mismatch_is_rejected(self, matrix):
+        """Silently filling the wrong block would corrupt the design matrix."""
+        sparse = _as_sparse(matrix, "csr", np.float64)
+        with pytest.raises(ValueError, match="out must have shape"):
+            densify(sparse, out=np.empty((matrix.shape[0], matrix.shape[1] + 1), np.float32))
+
+    @pytest.mark.parametrize("block_bytes", [1, 4096, 1 << 20])
+    def test_block_size_never_changes_the_bytes(self, matrix, block_bytes):
+        sparse = _as_sparse(matrix, "csr", np.float64)
+        n_rows, n_cols = matrix.shape
+        design = np.empty((n_rows, n_cols + 3), dtype=np.float32)
+        block = densify(sparse, out=design[:, :n_cols], block_bytes=block_bytes)
+        assert block.tobytes() == densify(sparse).tobytes()
+
+    def test_torch_reads_the_block_without_copying_it(self, matrix):
+        """The assumption the single-allocation design rests on.
+
+        The gene block has a row stride of ``n_genes + n_nuisance``, which BLAS
+        takes as a leading dimension, so the encoder's matmul runs on it directly.
+        If torch ever materialized a contiguous copy instead, the second full
+        panel this construction exists to avoid would silently come back.
+        """
+        torch = pytest.importorskip("torch")
+        n_rows, n_cols = matrix.shape
+        design = np.empty((n_rows, n_cols + 4), dtype=np.float32)
+        block = densify(_as_sparse(matrix, "csr", np.float64), out=design[:, :n_cols])
+
+        strided = torch.from_numpy(block)
+        contiguous = torch.from_numpy(np.ascontiguousarray(block))
+        assert not strided.is_contiguous()
+
+        torch.manual_seed(0)
+        layer = torch.nn.Linear(n_cols, 3, bias=False)
+        with torch.no_grad():
+            from_view, from_copy = layer(strided), layer(contiguous)
+        assert from_view.numpy().tobytes() == from_copy.numpy().tobytes()
+
+
 class TestOutputContract:
     @pytest.mark.parametrize("fmt", FORMATS)
     def test_sparse_input_is_c_contiguous(self, matrix, fmt):

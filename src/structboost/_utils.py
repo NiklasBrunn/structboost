@@ -22,6 +22,7 @@ def densify(
     matrix: object,
     *,
     dtype: DTypeLike = np.float32,
+    out: NDArray[np.floating] | None = None,
     block_bytes: int = _DENSIFY_BLOCK_BYTES,
 ) -> NDArray[np.floating]:
     """Dense array of ``dtype`` from a possibly-sparse matrix, block by block.
@@ -52,22 +53,40 @@ def densify(
         time. That conversion allocates ``nnz``-sized arrays, not ``n * p`` ones.
     dtype
         Output dtype. Defaults to ``float32``, the precision a fit runs in.
+        Ignored when ``out`` is given, which carries its own.
+    out
+        Write into this array instead of allocating one, and return it. It may be
+        a *view*, which is the point: a caller building a wider design matrix can
+        hand over a column block and have the panel read straight into place,
+        rather than densifying separately and copying the result in. Unlike the
+        allocating form this always writes, so a dense input is copied.
     block_bytes
         Target size of one row block in the output. The block is always at least
         one row, so a panel wider than this still works.
 
     Returns
     -------
-    Dense ``(n_samples, n_features)`` array of ``dtype``.
+    Dense ``(n_samples, n_features)`` array of ``dtype``, or ``out``.
     """
     import scipy.sparse as sp
 
     dtype = np.dtype(dtype)
+    if out is not None:
+        if tuple(out.shape) != tuple(matrix.shape):
+            raise ValueError(f"out must have shape {tuple(matrix.shape)}, got {tuple(out.shape)}")
+        dtype = out.dtype
+
     if not sp.issparse(matrix):
-        return np.asarray(matrix, dtype=dtype)
+        if out is None:
+            return np.asarray(matrix, dtype=dtype)
+        # Straight elementwise conversion into place: no dense intermediate in
+        # the source dtype, exactly as in the block loop below.
+        out[...] = matrix
+        return out
 
     n_rows, n_cols = matrix.shape
-    out = np.empty((n_rows, n_cols), dtype=dtype)
+    if out is None:
+        out = np.empty((n_rows, n_cols), dtype=dtype)
     if out.size == 0:
         return out
 

@@ -1718,14 +1718,47 @@ class BAE(nn.Module):
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(seed)
 
-        # Prepare data. `densify` converts in row blocks rather than materializing
-        # a full dense matrix in the source dtype and converting it afterwards --
-        # same bytes, but the peak is the result plus one block instead of the
-        # result plus a whole float64 copy of it.
+        # --- Batch covariates: one encoding, two mechanisms it can drive ---
+        # Resolved before the expression matrix is read, because how many nuisance
+        # columns the boosting design carries decides how wide the array it is
+        # read into has to be.
+        self._batch_encoding = None
+        self._batch_integration_mode = batch_mode
+        D_condition: torch.Tensor | None = None
+        covariates_np: np.ndarray | None = None
+        n_nuisance = 0
+        if batch_columns is not None:
+            from ._utils import encode_obs_covariates
+
+            self._batch_encoding = encode_obs_covariates(adata, batch_columns)
+            # Both mechanisms read the same numbers, so they share one float32
+            # copy of them rather than casting the encoding twice.
+            covariates_np = self._batch_encoding.encoded.astype(np.float32)
+            if conditions_decoder:
+                D_condition = torch.from_numpy(covariates_np).to(self.config.device)
+            if regresses_encoder:
+                n_nuisance = self._batch_encoding.n_columns
+
+        # Prepare data. The boosting design is a single allocation -- the genes,
+        # then the nuisance columns when the mode regresses them -- and the panel
+        # is read straight into its gene block. `hstack` instead builds the
+        # augmented matrix *from* an existing dense panel, so both are resident at
+        # once; and `densify` fills the block in row blocks, so no full-size
+        # intermediate in the source dtype appears either.
+        #
+        # `X_np` is then a column view of that design. It is C-ordered within each
+        # row and only its row stride differs, which BLAS takes as a leading
+        # dimension: torch runs the encoder on it without a copy and returns
+        # bit-identical results.
         from ._utils import densify
 
         matrix = _expression_matrix(adata, self._layer)
-        X_np = densify(matrix)
+        if n_nuisance:
+            sourcemat_aug = np.empty((matrix.shape[0], self.n_genes + n_nuisance), dtype=np.float32)
+            X_np = densify(matrix, out=sourcemat_aug[:, : self.n_genes])
+            sourcemat_aug[:, self.n_genes :] = covariates_np
+        else:
+            X_np = sourcemat_aug = densify(matrix)
 
         # Warn if data doesn't appear standardized. The result also decides whether
         # a PCA warm start needs to center the data (it must not re-transform data
@@ -1741,9 +1774,6 @@ class BAE(nn.Module):
 
         # Use full dataset for training (no validation split)
         X_train = self._to_tensor(X_np, self.config.device)
-
-        # Covariance cache for boosting (uses training data only)
-        X_train_np = X_train.cpu().numpy()
 
         # --- Latent state initialization (warm start) ---
         if init_pretrain_epochs < 0:
@@ -1779,23 +1809,6 @@ class BAE(nn.Module):
             else None
         )
 
-        # --- Batch covariates: one encoding, two mechanisms it can drive ---
-        self._batch_encoding = None
-        self._batch_integration_mode = batch_mode
-        D_condition: torch.Tensor | None = None
-        D_nuisance_np: np.ndarray | None = None
-        n_nuisance = 0
-        if batch_columns is not None:
-            from ._utils import encode_obs_covariates
-
-            self._batch_encoding = encode_obs_covariates(adata, batch_columns)
-            if conditions_decoder:
-                condition_np = self._batch_encoding.encoded.astype(np.float32)
-                D_condition = torch.from_numpy(condition_np).to(self.config.device)
-            if regresses_encoder:
-                D_nuisance_np = self._batch_encoding.encoded.astype(np.float32)
-                n_nuisance = self._batch_encoding.n_columns
-
         # Always rebuild so repeated fits cannot retain a stale conditioning shape.
         decoder_input = (
             2 * self.config.latent_dim if self.config.split_softmax else self.config.latent_dim
@@ -1818,12 +1831,6 @@ class BAE(nn.Module):
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(seed)
             self.decoder.reset_parameters()
-
-        # Build augmented sourcemat for allboost
-        if D_nuisance_np is not None:
-            sourcemat_aug = np.hstack([X_train_np, D_nuisance_np])
-        else:
-            sourcemat_aug = X_train_np
 
         # Build combined mandatory indices (genes + obs covariates)
         allboost_mandatory = _build_allboost_mandatory(resolved_mandatory, n_nuisance, self.n_genes)
@@ -2003,7 +2010,7 @@ class BAE(nn.Module):
 
             # Extract gene weights only; obs weights are nuisance (discarded)
             W_genes = betamat[:, : self.n_genes]
-            batch_weights = betamat[:, self.n_genes :].copy() if D_nuisance_np is not None else None
+            batch_weights = betamat[:, self.n_genes :].copy() if n_nuisance else None
             W = torch.from_numpy(W_genes.astype(np.float32)).to(self.config.device)
             self.encoder.set_weights(W)
 
@@ -2273,25 +2280,33 @@ class BAE(nn.Module):
         if seed is not None:
             torch.manual_seed(seed)
 
+        # One encoding drives both mechanisms. Under "both" this used to re-run
+        # `transform_obs_covariates` over the same obs columns for each of them.
+        covariates_np = None
+        if self._conditions_decoder or self._regresses_encoder:
+            covariates_np = np.asarray(
+                transform_obs_covariates(adata, self._batch_encoding), dtype=np.float32
+            )
+        n_nuisance = self._batch_encoding.n_columns if self._regresses_encoder else 0
+
+        # One allocation for the boosting design, panel read straight into its
+        # gene block; see the same construction in `fit`. float32 throughout,
+        # matching `fit`: this path used to promote to float64 on top of the
+        # float32 copy -- three copies of the expression matrix resident at once
+        # -- buying a precision difference measured at about one gene in 380, far
+        # inside the run-to-run support variation this method documents.
         matrix = _expression_matrix(adata, self._layer)
-        X_np = densify(matrix)
+        if n_nuisance:
+            sourcemat_aug = np.empty((matrix.shape[0], self.n_genes + n_nuisance), dtype=np.float32)
+            X_np = densify(matrix, out=sourcemat_aug[:, : self.n_genes])
+            sourcemat_aug[:, self.n_genes :] = covariates_np
+        else:
+            X_np = sourcemat_aug = densify(matrix)
         X_train = self._to_tensor(X_np, self.config.device)
 
-        D_condition = None
-        if self._conditions_decoder:
-            D_condition = self._to_tensor(
-                transform_obs_covariates(adata, self._batch_encoding), self.config.device
-            )
-        # float32, matching `fit`. This path used to promote to float64 on top of
-        # the float32 copy above -- three copies of the expression matrix resident
-        # at once -- buying a precision difference measured at about one gene in
-        # 380, far inside the run-to-run support variation this method documents.
-        sourcemat_aug = X_np
-        n_nuisance = 0
-        if self._regresses_encoder:
-            D_nuisance = transform_obs_covariates(adata, self._batch_encoding)
-            sourcemat_aug = np.hstack([sourcemat_aug, np.asarray(D_nuisance, dtype=np.float32)])
-            n_nuisance = self._batch_encoding.n_columns
+        D_condition = (
+            self._to_tensor(covariates_np, self.config.device) if self._conditions_decoder else None
+        )
 
         resolved_mandatory = resolve_mandatory_genes(self._mandatory_genes, adata)
         allboost_mandatory = _build_allboost_mandatory(resolved_mandatory, n_nuisance, self.n_genes)
