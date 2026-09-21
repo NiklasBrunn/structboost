@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import functools
 import warnings
-from dataclasses import fields, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -273,6 +273,38 @@ def _build_allboost_mandatory(
         # Per-target: append obs indices to each sub-list
         return [np.concatenate([sub, obs_indices]) for sub in resolved_mandatory]
     return np.concatenate([resolved_mandatory, obs_indices])
+
+
+@dataclass(frozen=True)
+class _BoostingDesign:
+    """The matrix ``allboost`` is fitted against, and the parts of it that are fixed.
+
+    Built the same way by :meth:`BAE.fit` and by
+    :meth:`BAE._iteration_support_frequency`, which documents itself as mirroring
+    the fit loop and whose equivalence ``tests/test_stability.py`` pins. Sharing
+    the construction is what keeps that true rather than merely intended.
+
+    Attributes
+    ----------
+    panel
+        ``(n_cells, n_genes)`` expression, float32 — what the encoder reads. When
+        there are nuisance columns this is a column *view* of ``matrix``, so the
+        two are never separate copies of the same numbers.
+    matrix
+        ``(n_cells, n_genes + n_nuisance)`` — what boosting actually sees.
+    col_norms_sq
+        Squared column norms of ``matrix``. Fixed for a whole fit, so ``allboost``
+        is handed them instead of repeating an O(n*p) pass, and a full-size
+        temporary, on every training iteration.
+    mandatory_ridge
+        Per-column ridge for the unpenalized block, non-zero only on the nuisance
+        columns. Mandatory *gene* coefficients are never penalized.
+    """
+
+    panel: np.ndarray
+    matrix: np.ndarray
+    col_norms_sq: np.ndarray
+    mandatory_ridge: np.ndarray
 
 
 class _FitLayer:
@@ -1482,6 +1514,58 @@ class BAE(nn.Module):
 
         return torch.from_numpy(densify(X)).to(device)
 
+    def _build_boosting_design(
+        self,
+        matrix: np.ndarray | sp.spmatrix,
+        *,
+        covariates: np.ndarray | None = None,
+        n_nuisance: int = 0,
+    ) -> _BoostingDesign:
+        """Read the expression panel into the design matrix boosting is fitted on.
+
+        One allocation holds both blocks and the panel is densified straight into
+        the gene block. ``np.hstack`` instead builds the augmented matrix *from*
+        an already-dense panel, so two full copies are resident at once; and
+        :func:`~structboost._utils.densify` fills the block in row blocks, so no
+        full-size intermediate in the source dtype appears either.
+
+        The returned ``panel`` is then a column view of the design: C-ordered
+        within each row and differing only in row stride, which BLAS takes as a
+        leading dimension. Torch runs the encoder on it without materializing a
+        contiguous copy, and returns bit-identical results — see
+        ``tests/test_densify.py``, which pins that, since a torch that copied
+        instead would silently restore the second panel this avoids.
+
+        Parameters
+        ----------
+        matrix
+            Expression, dense or sparse, as :func:`_expression_matrix` returns it.
+        covariates
+            Encoded obs covariates, float32. Required when ``n_nuisance`` is set.
+        n_nuisance
+            Width of the nuisance block; ``0`` leaves the design gene-only, and
+            ``panel`` is then the design itself rather than a view into it.
+        """
+        from ._utils import densify
+
+        if n_nuisance:
+            full = np.empty((matrix.shape[0], self.n_genes + n_nuisance), dtype=np.float32)
+            panel = densify(matrix, out=full[:, : self.n_genes])
+            full[:, self.n_genes :] = covariates
+        else:
+            panel = full = densify(matrix)
+
+        ridge = np.zeros(full.shape[1], dtype=np.float64)
+        if n_nuisance:
+            ridge[self.n_genes :] = self.config.nuisance_ridge
+
+        return _BoostingDesign(
+            panel=panel,
+            matrix=full,
+            col_norms_sq=column_norms_sq(full),
+            mandatory_ridge=ridge,
+        )
+
     @_isolates_torch_rng(config_fallback=True)
     def fit(
         self,
@@ -1660,7 +1744,6 @@ class BAE(nn.Module):
                 raise ValueError("batch_key must name at least one obs column")
             batch_mode = "both" if batch_integration_mode is _MODE_UNSET else batch_integration_mode
         conditions_decoder, regresses_encoder = _BATCH_MODES[batch_mode]
-        nuisance_ridge = self.config.nuisance_ridge
 
         resolved_mandatory = resolve_mandatory_genes(mandatory_genes, adata)
         self._mandatory_genes = mandatory_genes
@@ -1739,26 +1822,14 @@ class BAE(nn.Module):
             if regresses_encoder:
                 n_nuisance = self._batch_encoding.n_columns
 
-        # Prepare data. The boosting design is a single allocation -- the genes,
-        # then the nuisance columns when the mode regresses them -- and the panel
-        # is read straight into its gene block. `hstack` instead builds the
-        # augmented matrix *from* an existing dense panel, so both are resident at
-        # once; and `densify` fills the block in row blocks, so no full-size
-        # intermediate in the source dtype appears either.
-        #
-        # `X_np` is then a column view of that design. It is C-ordered within each
-        # row and only its row stride differs, which BLAS takes as a leading
-        # dimension: torch runs the encoder on it without a copy and returns
-        # bit-identical results.
-        from ._utils import densify
-
-        matrix = _expression_matrix(adata, self._layer)
-        if n_nuisance:
-            sourcemat_aug = np.empty((matrix.shape[0], self.n_genes + n_nuisance), dtype=np.float32)
-            X_np = densify(matrix, out=sourcemat_aug[:, : self.n_genes])
-            sourcemat_aug[:, self.n_genes :] = covariates_np
-        else:
-            X_np = sourcemat_aug = densify(matrix)
+        # Prepare data: one allocation for the whole boosting design, with the
+        # panel read straight into its gene block. See `_build_boosting_design`.
+        design = self._build_boosting_design(
+            _expression_matrix(adata, self._layer),
+            covariates=covariates_np,
+            n_nuisance=n_nuisance,
+        )
+        X_np = design.panel
 
         # Warn if data doesn't appear standardized. The result also decides whether
         # a PCA warm start needs to center the data (it must not re-transform data
@@ -1834,9 +1905,6 @@ class BAE(nn.Module):
 
         # Build combined mandatory indices (genes + obs covariates)
         allboost_mandatory = _build_allboost_mandatory(resolved_mandatory, n_nuisance, self.n_genes)
-        mandatory_ridge = np.zeros(sourcemat_aug.shape[1], dtype=np.float64)
-        if n_nuisance:
-            mandatory_ridge[self.n_genes :] = nuisance_ridge
 
         # A frozen transfer with no added dimensions never calls allboost at all
         # (there is nothing left to select), so building a covariance matrix for
@@ -1850,20 +1918,15 @@ class BAE(nn.Module):
         from ._utils import resolve_precompute_covcache
 
         precompute_covcache = boosts_anything and resolve_precompute_covcache(
-            self.config.boosting_precompute_covcache, sourcemat_aug.shape[1]
+            self.config.boosting_precompute_covcache, design.matrix.shape[1]
         )
         self._precomputed_covcache = precompute_covcache
         if precompute_covcache:
             from ._utils import compute_covariance_cache
 
-            covcache = compute_covariance_cache(sourcemat_aug)
+            covcache = compute_covariance_cache(design.matrix)
         else:
             covcache = None  # Lazy computation during allboost
-
-        # `sourcemat_aug` is fixed for the whole fit, so its column norms are too.
-        # allboost recomputes them on every call otherwise -- an O(n*p) pass and a
-        # full-size temporary, once per training iteration.
-        boosting_col_norms_sq = column_norms_sq(sourcemat_aug)
 
         # Optimizer for decoder only
         decoder_optimizer = torch.optim.AdamW(
@@ -1971,42 +2034,42 @@ class BAE(nn.Module):
             # model the prior columns are either withheld ("frozen") or boosted
             # from the fixed original matrix as an offset ("anchored").
             fit_targets, beta_init, fit_mandatory = self._transfer_boosting_inputs(
-                targets, sourcemat_aug.shape[1], prior_dims, allboost_mandatory
+                targets, design.matrix.shape[1], prior_dims, allboost_mandatory
             )
             if fit_targets.shape[1] == 0:
                 # Frozen transfer with no additional dimensions: nothing competes
                 # for selection, and only the decoder adapts to the new data.
-                betamat = np.zeros((0, sourcemat_aug.shape[1]), dtype=np.float64)
+                betamat = np.zeros((0, design.matrix.shape[1]), dtype=np.float64)
             elif covcache is None:
                 betamat, covcache = allboost(
-                    sourcemat_aug,
+                    design.matrix,
                     fit_targets,
                     covcache=covcache,
-                    col_norms_sq=boosting_col_norms_sq,
+                    col_norms_sq=design.col_norms_sq,
                     stepno=self.config.boosting_stepno,
                     nu=self.config.boosting_nu,
                     csf=self.config.boosting_csf,
                     independent=self.config.boosting_independent,
                     mandatory_features=fit_mandatory,
-                    mandatory_ridge=mandatory_ridge,
+                    mandatory_ridge=design.mandatory_ridge,
                     beta_init=beta_init,
                     return_covcache=True,
                 )
             else:
                 betamat = allboost(
-                    sourcemat_aug,
+                    design.matrix,
                     fit_targets,
                     covcache=covcache,
-                    col_norms_sq=boosting_col_norms_sq,
+                    col_norms_sq=design.col_norms_sq,
                     stepno=self.config.boosting_stepno,
                     nu=self.config.boosting_nu,
                     csf=self.config.boosting_csf,
                     independent=self.config.boosting_independent,
                     mandatory_features=fit_mandatory,
-                    mandatory_ridge=mandatory_ridge,
+                    mandatory_ridge=design.mandatory_ridge,
                     beta_init=beta_init,
                 )
-            betamat = self._expand_transfer_betamat(betamat, sourcemat_aug.shape[1], prior_dims)
+            betamat = self._expand_transfer_betamat(betamat, design.matrix.shape[1], prior_dims)
 
             # Extract gene weights only; obs weights are nuisance (discarded)
             W_genes = betamat[:, : self.n_genes]
@@ -2268,7 +2331,6 @@ class BAE(nn.Module):
         """
         from ._utils import (
             compute_covariance_cache,
-            densify,
             resolve_mandatory_genes,
             resolve_precompute_covcache,
             transform_obs_covariates,
@@ -2289,20 +2351,17 @@ class BAE(nn.Module):
             )
         n_nuisance = self._batch_encoding.n_columns if self._regresses_encoder else 0
 
-        # One allocation for the boosting design, panel read straight into its
-        # gene block; see the same construction in `fit`. float32 throughout,
-        # matching `fit`: this path used to promote to float64 on top of the
-        # float32 copy -- three copies of the expression matrix resident at once
-        # -- buying a precision difference measured at about one gene in 380, far
-        # inside the run-to-run support variation this method documents.
-        matrix = _expression_matrix(adata, self._layer)
-        if n_nuisance:
-            sourcemat_aug = np.empty((matrix.shape[0], self.n_genes + n_nuisance), dtype=np.float32)
-            X_np = densify(matrix, out=sourcemat_aug[:, : self.n_genes])
-            sourcemat_aug[:, self.n_genes :] = covariates_np
-        else:
-            X_np = sourcemat_aug = densify(matrix)
-        X_train = self._to_tensor(X_np, self.config.device)
+        # The same design `fit` builds, float32 throughout: this path used to
+        # promote to float64 on top of the float32 copy -- three copies of the
+        # expression matrix resident at once -- buying a precision difference
+        # measured at about one gene in 380, far inside the run-to-run support
+        # variation this method documents.
+        design = self._build_boosting_design(
+            _expression_matrix(adata, self._layer),
+            covariates=covariates_np,
+            n_nuisance=n_nuisance,
+        )
+        X_train = self._to_tensor(design.panel, self.config.device)
 
         D_condition = (
             self._to_tensor(covariates_np, self.config.device) if self._conditions_decoder else None
@@ -2310,18 +2369,13 @@ class BAE(nn.Module):
 
         resolved_mandatory = resolve_mandatory_genes(self._mandatory_genes, adata)
         allboost_mandatory = _build_allboost_mandatory(resolved_mandatory, n_nuisance, self.n_genes)
-        mandatory_ridge = np.zeros(sourcemat_aug.shape[1], dtype=np.float64)
-        if n_nuisance:
-            mandatory_ridge[self.n_genes :] = self.config.nuisance_ridge
-        # Fixed across every iteration recorded here, exactly as in `fit`.
-        boosting_col_norms_sq = column_norms_sq(sourcemat_aug)
         # Honour the same covariance-cache setting `fit` resolved. Without this,
         # the method documented as mirroring the fit loop would run a different
         # cache strategy from the fit it is analysing.
         if resolve_precompute_covcache(
-            self.config.boosting_precompute_covcache, sourcemat_aug.shape[1]
+            self.config.boosting_precompute_covcache, design.matrix.shape[1]
         ):
-            covcache_initial = compute_covariance_cache(sourcemat_aug)
+            covcache_initial = compute_covariance_cache(design.matrix)
         else:
             covcache_initial = None
 
@@ -2401,22 +2455,22 @@ class BAE(nn.Module):
                     )
                 self.encoder.reset_weights()
                 fit_targets, beta_init, fit_mandatory = self._transfer_boosting_inputs(
-                    targets, sourcemat_aug.shape[1], prior_dims, allboost_mandatory
+                    targets, design.matrix.shape[1], prior_dims, allboost_mandatory
                 )
                 if fit_targets.shape[1] == 0:
-                    betamat = np.zeros((0, sourcemat_aug.shape[1]), dtype=np.float64)
+                    betamat = np.zeros((0, design.matrix.shape[1]), dtype=np.float64)
                 else:
                     result = allboost(
-                        sourcemat_aug,
+                        design.matrix,
                         fit_targets,
                         covcache=covcache,
-                        col_norms_sq=boosting_col_norms_sq,
+                        col_norms_sq=design.col_norms_sq,
                         stepno=self.config.boosting_stepno,
                         nu=self.config.boosting_nu,
                         csf=self.config.boosting_csf,
                         independent=self.config.boosting_independent,
                         mandatory_features=fit_mandatory,
-                        mandatory_ridge=mandatory_ridge,
+                        mandatory_ridge=design.mandatory_ridge,
                         beta_init=beta_init,
                         return_covcache=covcache is None,
                     )
@@ -2424,7 +2478,7 @@ class BAE(nn.Module):
                         betamat, covcache = result
                     else:
                         betamat = result
-                betamat = self._expand_transfer_betamat(betamat, sourcemat_aug.shape[1], prior_dims)
+                betamat = self._expand_transfer_betamat(betamat, design.matrix.shape[1], prior_dims)
 
                 W_genes = betamat[:, : self.n_genes]
                 self.encoder.set_weights(
@@ -3162,12 +3216,6 @@ class BAE(nn.Module):
     def _store_results(self, adata: AnnData, X: torch.Tensor) -> None:
         """Store results in AnnData (scverse convention).
 
-        ``X`` is the training matrix ``fit`` already holds. It used to be read and
-        densified a second time here, which put two ``(n_cells, n_genes)`` float32
-        arrays on the heap at the one moment a fit has the most else resident --
-        2.4 GB of them at 300,000 cells by 2,000 genes. There is only ever one
-        caller, and it is holding the identical tensor.
-
         Two of the recorded metrics answer different questions and are easy to
         confuse:
 
@@ -3189,6 +3237,17 @@ class BAE(nn.Module):
         :func:`~structboost.linear_ceiling` for the achievable maximum. It is
         written by every fit; only ``reconstruction_loss_by_obs`` and
         ``latent_obs_r2_per_dim`` require a covariate.
+
+        Parameters
+        ----------
+        adata
+            Receives the embedding, the encoder weights and the metadata below.
+        X
+            The training matrix ``fit`` is already holding. This used to be read
+            and densified a second time here, putting two ``(n_cells, n_genes)``
+            float32 arrays on the heap at the one moment a fit has the most else
+            resident -- 2.4 GB of them at 300,000 cells by 2,000 genes. There is
+            only ever one caller, and it has the identical tensor in hand.
         """
         # Recorded so a fitted model is itself a usable prior for a later transfer:
         # `from_reference` needs gene identifiers, which the weight matrix lacks.

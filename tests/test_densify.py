@@ -107,7 +107,9 @@ class TestWritingIntoAView:
             densify(sparse, out=np.empty((matrix.shape[0], matrix.shape[1] + 1), np.float32))
 
     @pytest.mark.parametrize("block_bytes", [1, 4096, 1 << 20])
-    def test_block_size_never_changes_the_bytes(self, matrix, block_bytes):
+    def test_block_size_invariant_when_writing_into_a_view(self, matrix, block_bytes):
+        """The same partition property as the allocating form, but the block
+        loop now writes across a row stride, so it is worth pinning separately."""
         sparse = _as_sparse(matrix, "csr", np.float64)
         n_rows, n_cols = matrix.shape
         design = np.empty((n_rows, n_cols + 3), dtype=np.float32)
