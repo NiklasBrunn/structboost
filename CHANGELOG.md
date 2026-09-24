@@ -3,6 +3,34 @@
 Releases follow [semantic versioning](https://semver.org). While the project is
 pre-1.0, a minor bump may break API.
 
+### [0.6.1] - 2026-09-24
+
+**Not breaking.** CSR and dense input give bit-identical fits; CSC input
+changes in the last bits (below).
+
+**Fits need less memory and run faster.** Measured at 300,000 cells by 2,000
+genes: peak memory 10.4 GB to 8.3 GB, wall clock 44.8 s to 25.9 s. Three copies
+of the expression matrix are gone:
+
+- The sparse matrix is densified in row blocks straight into float32, instead of
+  through a full-size intermediate in its source dtype.
+- `fit` hands the training matrix to the step that writes `adata.obsm["X_bae"]`
+  instead of densifying `adata.X` a second time.
+- With batch integration on (`batch_integration_mode` `"encoder"` or `"both"`),
+  the boosting design is allocated once with room for the covariate columns,
+  instead of copying the whole panel with `np.hstack` to append them. Batch
+  integration now costs about the same peak memory as a fit without it, and
+  400,000 cells fit where they ran out of memory before.
+
+A float32 `adata.X` is now trained on in place rather than copied. A fit never
+writes to it; a read-only array is still copied.
+
+**CSC input now gives the same fit as CSR.** `csc.toarray()` returns a
+Fortran-ordered array, which changed the BLAS reduction order and with it the
+fitted weights (2.3e-9 on a 12-iteration fit). The densified matrix is now
+row-major whatever the input, so a CSC-backed fit will not reproduce its earlier
+result, and matches the CSR result for the same data instead.
+
 ### [0.6.0] - 2026-09-09
 
 **Not breaking.** Nothing existing changes behaviour; this adds a way to read a
