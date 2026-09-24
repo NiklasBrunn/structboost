@@ -9,6 +9,8 @@ They also pin the property the helper introduced on top of that: a fit no longer
 depends on which sparse format ``adata.X`` happens to be stored in.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -174,32 +176,61 @@ class TestOutputContract:
         assert result.dtype == np.float32
 
 
+def _fit(adata, **kwargs):
+    """A short, seeded fit; returns the model."""
+    from structboost import BAE, BAEConfig
+
+    model = BAE(adata.n_vars, BAEConfig(latent_dim=3, max_iterations=6, seed=5, batch_size=64))
+    model.fit(adata, verbose=False, **kwargs)
+    return model
+
+
+@pytest.fixture
+def standardized():
+    rng = np.random.default_rng(3)
+    x = rng.standard_normal((120, 40))
+    return (x - x.mean(axis=0)) / x.std(axis=0)
+
+
 class TestStorageFormatIndependence:
     """The same data must give the same model however AnnData stored it."""
 
-    @staticmethod
-    def _fit_weights(x, fmt):
-        from anndata import AnnData
-
-        from structboost import BAE, BAEConfig
-
-        # AnnData stores CSR and CSC only, which is also the whole population of
-        # formats this property can be violated by.
-        payload = x if fmt == "dense" else getattr(sp, f"{fmt}_matrix")(x)
-        adata = AnnData(X=payload)
-        model = BAE(adata.n_vars, BAEConfig(latent_dim=3, max_iterations=6, seed=5, batch_size=64))
-        model.fit(adata, verbose=False)
-        return model.get_encoder_weights()
-
-    def test_csr_csc_dense_agree_bitwise(self):
+    def test_csr_csc_dense_agree_bitwise(self, standardized):
         """Regression test: ``csc.toarray()`` is Fortran-ordered, so before
         ``densify`` the storage format changed the BLAS reduction order and with
         it the fitted weights, by ~2e-9 on a short fit."""
         pytest.importorskip("torch")
-        pytest.importorskip("anndata")
-        rng = np.random.default_rng(3)
-        x = rng.standard_normal((120, 40))
-        x = (x - x.mean(axis=0)) / x.std(axis=0)
-        reference = self._fit_weights(x, "csr")
-        for fmt in ("csc", "dense"):
-            assert self._fit_weights(x, fmt).tobytes() == reference.tobytes(), fmt
+        anndata = pytest.importorskip("anndata")
+
+        # AnnData stores CSR and CSC only, which is also the whole population of
+        # formats this property can be violated by.
+        def weights(payload):
+            return _fit(anndata.AnnData(X=payload)).get_encoder_weights().tobytes()
+
+        reference = weights(sp.csr_matrix(standardized))
+        for payload in (sp.csc_matrix(standardized), standardized):
+            assert weights(payload) == reference, type(payload).__name__
+
+
+class TestInputIsLeftAlone:
+    """A float32 ``adata.X`` is trained on in place rather than copied, so the
+    training tensor aliases the user's data. Nothing in a fit may write to it."""
+
+    @pytest.mark.parametrize("fit_kwargs", [{}, {"init_pca": True}, {"batch_key": "batch"}])
+    def test_fit_does_not_modify_adata_x(self, standardized, fit_kwargs):
+        pytest.importorskip("torch")
+        anndata = pytest.importorskip("anndata")
+        x = standardized.astype(np.float32)
+        adata = anndata.AnnData(X=x.copy())
+        adata.obs["batch"] = np.where(np.arange(x.shape[0]) % 2, "a", "b")
+        _fit(adata, **fit_kwargs)
+        assert adata.X.tobytes() == x.tobytes()
+
+    def test_read_only_input_fits_without_a_torch_warning(self, standardized):
+        pytest.importorskip("torch")
+        anndata = pytest.importorskip("anndata")
+        x = standardized.astype(np.float32)
+        x.setflags(write=False)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", message=".*not writable.*")
+            _fit(anndata.AnnData(X=x))

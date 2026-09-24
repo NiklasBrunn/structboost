@@ -5,65 +5,31 @@ pre-1.0, a minor bump may break API.
 
 ### [Unreleased]
 
-**Not breaking for CSR or dense input**, which is bit-for-bit unchanged. CSC
-input changes in the last bits, for the reason below.
+**Not breaking.** CSR and dense input give bit-identical fits; CSC input
+changes in the last bits (below).
 
-**The expression matrix is densified in row blocks.** Every place a fit read
-`adata.X` did `matrix.toarray().astype(np.float32)`, which holds the dense panel
-twice at once — once in the source dtype and once converted. On a float64 CSR
-panel that is `12 * n * p` bytes at peak to produce a `4 * n * p` byte result:
-18 GB for 500,000 cells x 3,000 genes, which is where a fit stops being possible
-rather than merely slow. The new `densify` helper converts block by block
-straight into the output, so the peak is the result plus one 32 MB block.
+**Fits need less memory and run faster.** Measured at 300,000 cells by 2,000
+genes: peak memory 10.4 GB to 8.3 GB, wall clock 44.8 s to 25.9 s. Three copies
+of the expression matrix are gone:
 
-The bytes are identical: `toarray` scatters stored values into a zero-filled
-buffer and the dtype conversion is elementwise, so neither depends on how the
-rows are grouped. Nothing is reassociated. The three call sites that each had
-their own copy of the densify-and-cast expression — `fit`,
-`_iteration_support_frequency` and `_to_tensor` — now share one.
+- The sparse matrix is densified in row blocks straight into float32, instead of
+  through a full-size intermediate in its source dtype.
+- `fit` hands the training matrix to the step that writes `adata.obsm["X_bae"]`
+  instead of densifying `adata.X` a second time.
+- With batch integration on (`batch_integration_mode` `"encoder"` or `"both"`),
+  the boosting design is allocated once with room for the covariate columns,
+  instead of copying the whole panel with `np.hstack` to append them. Batch
+  integration now costs about the same peak memory as a fit without it, and
+  400,000 cells fit where they ran out of memory before.
 
-**`_store_results` no longer re-reads the expression matrix.** It densified
-`adata.X` a second time to compute the latent embedding, putting two
-`(n_cells, n_genes)` float32 arrays on the heap at the one moment a fit has the
-most else resident. It has exactly one caller, which is already holding the
-identical tensor, so `fit` hands it over. Together with the block-wise
-densification this is 1.7x faster end to end at 300,000 cells by 2,000 genes
-(44.8 s to 25.9 s) and 1.26x lower in peak memory (10.4 GB to 8.3 GB).
+A float32 `adata.X` is now trained on in place rather than copied. A fit never
+writes to it; a read-only array is still copied.
 
-**The boosting design is one allocation when batch integration is on.** A fit
-that regresses a covariate (`batch_integration_mode` `"encoder"` or `"both"`,
-the default when `batch_key` is given) built its design with
-`np.hstack([panel, covariates])`, which duplicates the whole
-`(n_cells, n_genes)` panel in order to append a handful of columns to it. The
-augmented array is now allocated up front and the panel is read straight into
-its gene block, so only one copy is ever resident.
-
-`X_np` is then a column view of that design: C-ordered within each row, with
-only a wider row stride, which BLAS takes as a leading dimension. Torch runs the
-encoder on it with no copy and returns bit-identical results, which is what
-makes the construction viable — `tests/test_densify.py` pins that property, since
-a future torch that materialized a contiguous copy would silently restore the
-second panel this exists to avoid.
-
-The *obvious* alternative — keeping the two blocks separate and computing
-`X'r`, the column norms and the Gram blockwise — was rejected: splitting a GEMM
-changes its shape and therefore its tiling, so the results would move in the last
-bits.
-
-**The covariate encoding is computed once, not twice.** Under `"both"`, `fit`
-cast the same encoded matrix to float32 separately for each mechanism, and
-`BAE.stability_selection` re-ran `transform_obs_covariates` over the same obs
-columns for each of them. Both now share one result.
-
-**A fit no longer depends on how `adata.X` is stored.** `csc.toarray()` returns a
-*Fortran-ordered* array where `csr.toarray()` returns a C-ordered one, so on
-identical data the storage format changed the BLAS reduction order and with it
-the fitted encoder weights — measured at 2.3e-9 on a 12-iteration fit, which a
-longer fit amplifies. It also handed torch a non-contiguous training tensor,
-forcing an internal copy on every decoder forward pass. `densify` returns
-C-ordered output whatever the input format, so CSR, CSC and dense input now agree
-bitwise. This is the one behaviour change: a CSC-backed fit will not reproduce
-its pre-0.7 result, and now matches the CSR result for the same data instead.
+**CSC input now gives the same fit as CSR.** `csc.toarray()` returns a
+Fortran-ordered array, which changed the BLAS reduction order and with it the
+fitted weights (2.3e-9 on a 12-iteration fit). The densified matrix is now
+row-major whatever the input, so a CSC-backed fit will not reproduce its earlier
+result, and matches the CSR result for the same data instead.
 
 ### [0.6.0] - 2026-09-09
 

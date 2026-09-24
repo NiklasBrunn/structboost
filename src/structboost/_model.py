@@ -1509,10 +1509,16 @@ class BAE(nn.Module):
 
     @staticmethod
     def _to_tensor(X: np.ndarray | sp.spmatrix, device: torch.device) -> torch.Tensor:
-        """Convert array or sparse matrix to tensor."""
+        """Convert array or sparse matrix to tensor.
+
+        A float32 ndarray is shared, not copied, so the tensor may alias the
+        caller's ``adata.X``: nothing downstream may write to it. A read-only
+        array is copied instead, since torch cannot hold one without warning.
+        """
         from ._utils import densify
 
-        return torch.from_numpy(densify(X)).to(device)
+        X = densify(X)
+        return torch.from_numpy(X if X.flags.writeable else X.copy()).to(device)
 
     def _build_boosting_design(
         self,
