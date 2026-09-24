@@ -3,7 +3,7 @@
 Releases follow [semantic versioning](https://semver.org). While the project is
 pre-1.0, a minor bump may break API.
 
-### [Unreleased]
+### [0.6.1] - 2026-09-24
 
 **Not breaking.** CSR and dense input give bit-identical fits; CSC input
 changes in the last bits (below).
